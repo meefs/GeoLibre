@@ -13,7 +13,6 @@ import {
   closeSearchPlacesPanel,
   openFlatGeobufAddVectorLayerPanel,
   openDuckDBLayerPanel,
-  openGeoParquetLayerPanel,
   isSearchPlacesPanelVisible,
   openLidarLayerPanel,
   openPMTilesLayerPanel,
@@ -332,8 +331,20 @@ export function TopToolbar({
   const handleAddDuckDBLayer = () => {
     openDuckDBLayerPanel(appApi);
   };
-  const handleAddGeoParquetLayer = () => {
-    openGeoParquetLayerPanel(appApi);
+  const handleAddGeoParquetLayer = async () => {
+    try {
+      const { openGeoParquetPanel } = await import(
+        "../../lib/geoparquet-duckdb-runtime"
+      );
+      openGeoParquetPanel(appApi);
+    } catch (error) {
+      console.error("Failed to open the GeoParquet panel", error);
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : "Failed to open GeoParquet panel",
+      );
+    }
   };
   const handleAddPMTilesLayer = () => {
     openPMTilesLayerPanel(appApi);
@@ -522,7 +533,7 @@ export function TopToolbar({
           <DropdownMenuItem onSelect={() => setAddDataKind("raster")}>
             Add Raster Layer
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={handleAddGeoParquetLayer}>
+          <DropdownMenuItem onSelect={() => void handleAddGeoParquetLayer()}>
             Add GeoParquet Layer
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={handleAddFlatGeobufLayer}>
