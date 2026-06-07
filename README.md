@@ -56,6 +56,32 @@ docker run --rm -p 8080:80 geolibre
 
 Open http://localhost:8080. The Docker image serves the production Vite build with nginx. Desktop-only features such as Tauri filesystem dialogs, local MBTiles, local raster file reads, and project save/open require the desktop app.
 
+### Bundled conversion sidecar
+
+The image also bundles the Python conversion/Whitebox sidecar (uvicorn) and
+reverse-proxies it at `/sidecar`, so the browser reaches it same-origin with no
+CORS or separate process to manage. `/conversion/status` is reachable at
+`http://localhost:8080/sidecar/conversion/status`.
+
+- **Vector → GeoParquet** and **CSV → GeoParquet** run in the browser with
+  DuckDB-WASM and need no sidecar.
+- **Vector → FlatGeobuf**, **Vector → PMTiles**, and **Raster → COG** use the
+  sidecar. These read a file **path on the sidecar's filesystem**, so from a
+  pure browser they currently work for files mounted into the container (a
+  browser cannot hand the container an absolute path); upload-based input is a
+  planned follow-up. The desktop app passes real local paths, so all
+  conversions work there.
+- **PMTiles** and **Whitebox** are **amd64-only** in the container —
+  `freestiler` and `whitebox-workflows` publish no linux/arm64 wheels. On arm64
+  the other conversions still work; those two report unavailable.
+
+Set `GEOLIBRE_DISABLE_SIDECAR=1` to run nginx only (the original web-only
+behavior):
+
+```bash
+docker run --rm -p 8080:80 -e GEOLIBRE_DISABLE_SIDECAR=1 geolibre
+```
+
 The published image is available from GitHub Container Registry:
 
 ```bash
@@ -151,6 +177,29 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e .
 uvicorn geolibre_server.app.main:app --host 127.0.0.1 --port 8765
 ```
+
+### Conversion tools (Processing → Conversion)
+
+The **Processing → Conversion** menu (Vector → GeoParquet / FlatGeobuf,
+CSV → GeoParquet, Vector → PMTiles, Raster → COG) talks to this sidecar at
+`http://127.0.0.1:8765`. **Vector → GeoParquet** and **CSV → GeoParquet** also
+run fully in the browser with DuckDB-WASM and need no sidecar; the others
+require it.
+
+To use them from the **web** build, start the sidecar and serve the app from
+`localhost:5173` (CORS is restricted to that origin and the Tauri origins):
+
+```bash
+# install the conversion extras (DuckDB, rio-cogeo, freestiler)
+pip install -e "backend/geolibre_server[conversion]"
+# run it
+geolibre-server   # or: uvicorn geolibre_server.app.main:app --host 127.0.0.1 --port 8765
+```
+
+The sidecar self-bootstraps a managed runtime on first use; set
+`GEOLIBRE_CONVERSION_PYTHON=$(which python)` to reuse the current environment
+instead. See [backend/geolibre_server/README.md](backend/geolibre_server/README.md)
+for details.
 
 ## Repository layout
 

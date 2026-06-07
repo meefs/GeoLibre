@@ -1,0 +1,188 @@
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+
+from geolibre_server.app import conversion
+from geolibre_server.app.conversion import (
+    _PMTILES_SCRIPT,
+    _RASTER_SCRIPT,
+    _RESULT_MARKER,
+    _VECTOR_SCRIPT,
+    _evict_finished_jobs_locked,
+    _validate_paths,
+    csv_to_geoparquet,
+    raster_to_cog,
+    vector_to_geoparquet,
+    vector_to_pmtiles,
+    CsvToGeoParquetRequest,
+    RasterToCogRequest,
+    VectorToGeoParquetRequest,
+    VectorToPmtilesRequest,
+)
+from geolibre_server.app.runtime import JobState
+
+
+def test_embedded_scripts_compile() -> None:
+    """The inline conversion scripts must be valid Python with a result marker."""
+    for script in (_VECTOR_SCRIPT, _RASTER_SCRIPT, _PMTILES_SCRIPT):
+        compile(script, "<script>", "exec")
+        assert _RESULT_MARKER in script
+        assert "{marker}" not in script
+
+
+def test_validate_paths_accepts_existing_input_and_folder(tmp_path: Path) -> None:
+    """Existing input files and writable output folders pass validation."""
+    source = tmp_path / "input.geojson"
+    source.write_text("{}", encoding="utf-8")
+    input_path, output_path = _validate_paths(
+        str(source), str(tmp_path / "out.parquet")
+    )
+    assert input_path == str(source)
+    assert output_path == str(tmp_path / "out.parquet")
+
+
+def test_validate_paths_rejects_missing_input(tmp_path: Path) -> None:
+    """A missing input file is reported as a 400 error."""
+    with pytest.raises(HTTPException) as excinfo:
+        _validate_paths(str(tmp_path / "missing.tif"), str(tmp_path / "out.tif"))
+    assert excinfo.value.status_code == 400
+
+
+def test_validate_paths_rejects_missing_output_folder(tmp_path: Path) -> None:
+    """An output folder that does not exist is reported as a 400 error."""
+    source = tmp_path / "input.tif"
+    source.write_bytes(b"")
+    with pytest.raises(HTTPException) as excinfo:
+        _validate_paths(str(source), str(tmp_path / "nope" / "out.tif"))
+    assert excinfo.value.status_code == 400
+
+
+def test_vector_to_geoparquet_rejects_unknown_compression(tmp_path: Path) -> None:
+    """Unsupported Parquet compressions are rejected before starting a job."""
+    source = tmp_path / "input.geojson"
+    source.write_text("{}", encoding="utf-8")
+    request = VectorToGeoParquetRequest(
+        input_path=str(source),
+        output_path=str(tmp_path / "out.parquet"),
+        compression="brotli9000",
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        vector_to_geoparquet(request)
+    assert excinfo.value.status_code == 400
+
+
+def test_vector_to_geoparquet_rejects_nonpositive_row_group_size(
+    tmp_path: Path,
+) -> None:
+    """A non-positive row group size is rejected before starting a job."""
+    source = tmp_path / "input.geojson"
+    source.write_text("{}", encoding="utf-8")
+    request = VectorToGeoParquetRequest(
+        input_path=str(source),
+        output_path=str(tmp_path / "out.parquet"),
+        row_group_size=0,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        vector_to_geoparquet(request)
+    assert excinfo.value.status_code == 400
+
+
+def test_raster_to_cog_rejects_unknown_compression(tmp_path: Path) -> None:
+    """Unsupported COG compressions are rejected before starting a job."""
+    source = tmp_path / "input.tif"
+    source.write_bytes(b"")
+    request = RasterToCogRequest(
+        input_path=str(source),
+        output_path=str(tmp_path / "out.tif"),
+        compression="zip",
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        raster_to_cog(request)
+    assert excinfo.value.status_code == 400
+
+
+def test_csv_to_geoparquet_requires_lon_lat(tmp_path: Path) -> None:
+    """Missing lon/lat column names are rejected before starting a job."""
+    source = tmp_path / "points.csv"
+    source.write_text("name,x,y\n", encoding="utf-8")
+    request = CsvToGeoParquetRequest(
+        input_path=str(source),
+        output_path=str(tmp_path / "out.parquet"),
+        lon_column=" ",
+        lat_column="y",
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        csv_to_geoparquet(request)
+    assert excinfo.value.status_code == 400
+
+
+def test_csv_to_geoparquet_rejects_unknown_compression(tmp_path: Path) -> None:
+    """Unsupported Parquet compressions are rejected for CSV conversion too."""
+    source = tmp_path / "points.csv"
+    source.write_text("name,x,y\n", encoding="utf-8")
+    request = CsvToGeoParquetRequest(
+        input_path=str(source),
+        output_path=str(tmp_path / "out.parquet"),
+        lon_column="x",
+        lat_column="y",
+        compression="brotli",
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        csv_to_geoparquet(request)
+    assert excinfo.value.status_code == 400
+
+
+def test_vector_to_pmtiles_rejects_bad_zoom_range(tmp_path: Path) -> None:
+    """min_zoom greater than max_zoom is rejected before starting a job."""
+    source = tmp_path / "in.parquet"
+    source.write_bytes(b"")
+    request = VectorToPmtilesRequest(
+        input_path=str(source),
+        output_path=str(tmp_path / "out.pmtiles"),
+        min_zoom=10,
+        max_zoom=4,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        vector_to_pmtiles(request)
+    assert excinfo.value.status_code == 400
+
+
+def _job(job_id: str, status: str, created_at: str) -> JobState:
+    """Build a JobState fixture with a controllable creation timestamp."""
+    return JobState(
+        id=job_id,
+        status=status,
+        tool_id="vector-to-geoparquet",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def test_evict_finished_jobs_drops_oldest_first(monkeypatch) -> None:
+    """Eviction removes the oldest finished jobs, regardless of insert order."""
+    monkeypatch.setattr(conversion, "MAX_RETAINED_JOBS", 2)
+    # Insertion order deliberately does not match chronological order.
+    jobs = {
+        "c": _job("c", "succeeded", "2026-01-03T00:00:00+00:00"),
+        "a": _job("a", "succeeded", "2026-01-01T00:00:00+00:00"),
+        "b": _job("b", "failed", "2026-01-02T00:00:00+00:00"),
+    }
+    monkeypatch.setattr(conversion, "_JOBS", jobs)
+    _evict_finished_jobs_locked()
+    # Only the single oldest finished job (created 01-01) should be evicted.
+    assert set(jobs) == {"b", "c"}
+
+
+def test_evict_finished_jobs_never_drops_running(monkeypatch) -> None:
+    """Running and pending jobs are retained even when over the cap."""
+    monkeypatch.setattr(conversion, "MAX_RETAINED_JOBS", 1)
+    jobs = {
+        "old_running": _job("old_running", "running", "2026-01-01T00:00:00+00:00"),
+        "pending": _job("pending", "pending", "2026-01-02T00:00:00+00:00"),
+        "done": _job("done", "succeeded", "2026-01-03T00:00:00+00:00"),
+    }
+    monkeypatch.setattr(conversion, "_JOBS", jobs)
+    _evict_finished_jobs_locked()
+    # Excess is 2, but only the one finished job is eligible for eviction.
+    assert set(jobs) == {"old_running", "pending"}
