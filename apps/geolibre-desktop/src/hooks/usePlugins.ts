@@ -33,7 +33,11 @@ import { readDir, readFile } from "@tauri-apps/plugin-fs";
 import type { RefObject } from "react";
 import { useEffect, useSyncExternalStore } from "react";
 import { bundledPluginManifestPaths } from "virtual:bundled-plugins";
-import { loadExternalPlugins } from "../lib/external-plugins";
+import {
+  loadExternalPlugins,
+  reloadExternalUrlPlugin,
+  unloadRemovedUrlPlugins,
+} from "../lib/external-plugins";
 import { mergeStringLists } from "../lib/string-lists";
 import {
   openLocalDataFileWithFallback,
@@ -118,6 +122,20 @@ export function getPluginManager(): PluginManager {
   return manager;
 }
 
+// Upgrade an installed external plugin in place by re-fetching its manifest URL
+// and re-registering the published version. Used by the marketplace's Update
+// action.
+export async function upgradeExternalPlugin(
+  manifestUrl: string,
+  mapControllerRef: RefObject<MapController | null>,
+): Promise<void> {
+  await reloadExternalUrlPlugin(
+    manager,
+    manifestUrl,
+    createAppAPI(mapControllerRef),
+  );
+}
+
 export function usePluginRegistry() {
   useSyncExternalStore(
     (listener) => manager.subscribe(listener),
@@ -150,7 +168,9 @@ export function usePluginRegistry() {
 // Built-in plugins are registered at module load so the toolbar can render
 // plugin menu items on the first pass. This hook additionally kicks off the
 // external plugin scan and reports whether it has finished.
-export function useExternalPluginsReady(): boolean {
+export function useExternalPluginsReady(
+  mapControllerRef: RefObject<MapController | null>,
+): boolean {
   const desktopSettings = useDesktopSettingsStore(
     (state) => state.desktopSettings,
   );
@@ -159,9 +179,12 @@ export function useExternalPluginsReady(): boolean {
   );
 
   useEffect(() => {
+    // mapControllerRef is a stable ref object, so it is intentionally not a
+    // dependency; createAppAPI dereferences .current lazily.
     void ensureExternalPluginsLoadedWithSettings(
       desktopSettings,
       projectPluginManifestUrls,
+      createAppAPI(mapControllerRef),
     );
   }, [desktopSettings, projectPluginManifestUrls]);
 
@@ -199,6 +222,7 @@ function ensureExternalPluginsLoadedWithSettings(
     typeof useDesktopSettingsStore.getState
   >["desktopSettings"],
   projectPluginManifestUrls: string[],
+  app: ReturnType<typeof createAppAPI>,
 ): Promise<void> {
   const pluginManifestUrls = mergeStringLists(
     bundledPluginManifestUrls(),
@@ -224,13 +248,24 @@ function ensureExternalPluginsLoadedWithSettings(
   // previous scan (which never rejects) keeps at most one scan running.
   const previousLoad = externalPluginsLoadPromise ?? Promise.resolve();
   const loadPromise = previousLoad
-    .then(() =>
-      loadExternalPlugins(
+    .then(() => {
+      // Unregister URL plugins whose manifest URL was removed from the merged
+      // list (e.g. uninstalled from the marketplace) so the Plugins menu updates
+      // and any active control is torn down without a reload. This runs after
+      // the previous scan settles so a plugin whose load was still in flight is
+      // already recorded and can be removed.
+      const unloaded = unloadRemovedUrlPlugins(manager, pluginManifestUrls, app);
+      if (unloaded.length) {
+        console.info(
+          `Unloaded external GeoLibre plugins: ${unloaded.join(", ")}`,
+        );
+      }
+      return loadExternalPlugins(
         manager,
         desktopSettings.additionalPluginDirectories,
         pluginManifestUrls,
-      ),
-    )
+      );
+    })
     .then((result) => {
       if (result.loadedPluginIds.length) {
         console.info(
