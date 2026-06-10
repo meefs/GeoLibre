@@ -17,6 +17,7 @@ hide:
     <div class="hero__actions">
       <a class="md-button md-button--primary" href="https://viewer.geolibre.app/">Open live demo</a>
       <a class="md-button" href="getting-started/">Get started</a>
+      <a class="md-button" href="user-guide/interface/">User guide</a>
       <a class="md-button" href="downloads/">Download app</a>
     </div>
   </div>
@@ -32,31 +33,31 @@ hide:
 <div class="feature-card" markdown>
 ### MapLibre map workspace
 
-Use OpenFreeMap basemaps, a blank background, smooth pan and zoom, and toggle built-in map controls for navigation, terrain, globe view, geolocation, scale, attribution, and logo display.
+Pan, zoom, rotate, and tilt a MapLibre map with OpenFreeMap basemaps or a blank background. Toggle built-in controls for navigation, globe, terrain, geolocation, scale, attribution, and logo, plus on-map tools like Measure, Bookmark, Minimap, and View State.
 </div>
 
 <div class="feature-card" markdown>
 ### Local and remote data
 
-Load local vector data supported by DuckDB-WASM Spatial, add web tile and service layers, inspect attributes, style layers, reorder visibility, and save or reopen `.geolibre.json` projects from the desktop app.
+Load local and remote vector and raster data, inspect attributes in the table, style layers with data-driven symbology, reorder and refresh layers, and save, reopen, or share `.geolibre.json` projects.
 </div>
 
 <div class="feature-card" markdown>
-### Plugin-ready UI
+### Plugins and marketplace
 
-Built-in plugins cover basemaps, sample data, layer control, MapLibre components, swipe, street view, time slider, Overture Maps, LiDAR, GeoAgent, and GeoEditor integrations.
+Activate built-in plugins for layer control, basemaps, MapLibre components, swipe, street view, time slider, Overture Maps, LiDAR, GeoAgent, and GeoEditor, and install, update, or remove external plugins from the built-in marketplace.
 </div>
 
 <div class="feature-card" markdown>
 ### Advanced layer formats
 
-Add Data supports XYZ, WMS, GeoJSON URLs, vector tiles, COG and GeoTIFF rasters, MBTiles, ArcGIS layers, FlatGeobuf, PMTiles, Zarr, LiDAR, and Gaussian splats.
+Add Data covers XYZ, WMS, WFS, WMTS, ArcGIS, and STAC services; GeoParquet, FlatGeobuf, PMTiles, and Zarr cloud formats; COG and GeoTIFF rasters and MBTiles; LiDAR, Gaussian splats, and 3D Tiles; and DuckDB and PostgreSQL databases.
 </div>
 
 <div class="feature-card" markdown>
-### Processing foundation
+### Conversion and Whitebox
 
-The processing toolbox includes client-side algorithms now, with a roadmap toward DuckDB Spatial and an optional Python sidecar for heavier geoprocessing.
+Convert data to cloud-native GeoParquet, FlatGeobuf, PMTiles, and COG from the Conversion menu, and run batch geoprocessing with the Whitebox toolbox on the optional Python sidecar.
 </div>
 
 <div class="feature-card" markdown>
@@ -79,9 +80,25 @@ Common raster tools under Processing → Raster: hillshade, slope, aspect, repro
 
 </div>
 
+## Learn GeoLibre
+
+New to GeoLibre? Start with the [User Guide](user-guide/interface.md) for a feature-by-feature tour of the workspace, menus, panels, and tools, then follow the [Tutorials](tutorials/index.md) for hands-on, end-to-end workflows.
+
+- [Interface Overview](user-guide/interface.md): the toolbar, panels, map, and status bar.
+- [Adding Data](user-guide/adding-data.md): every file, web service, cloud, 3D, and database source.
+- [Processing Tools](user-guide/processing.md) and [SQL Workspace](user-guide/sql-workspace.md): analysis with vector, raster, conversion, Whitebox, and DuckDB Spatial SQL.
+- [Plugins & Marketplace](user-guide/plugins.md): activate built-ins and install from the registry.
+- [Your First Map](tutorials/first-map.md): add a layer, style it, inspect it, and share it.
+
+[Read the User Guide](user-guide/interface.md){ .md-button .md-button--primary }
+[Browse the Tutorials](tutorials/index.md){ .md-button }
+
 ## Try it in the browser
 
 The live demo is the browser-capable version of the GeoLibre desktop UI. It is useful for exploring the map, loading browser-selected vector data supported by DuckDB-WASM Spatial, adding URL-based layers, styling layers, and testing plugins. Desktop-only file dialogs, local MBTiles, local raster reads, and filesystem save/open operations still require the installed Tauri app.
+
+!!! note "Hosted on GitHub Pages, private by design"
+    The live demo is a static site deployed on GitHub Pages and runs entirely in your browser. It has no analytics and no server account, and the data you load is processed client-side in your browser session. Data leaves your browser only when you choose to add a remote URL or explicitly share a project.
 
 Open a project by passing a public `.geolibre.json` URL with the `url` query parameter:
 
@@ -109,19 +126,11 @@ For a fully chrome-free, map-only embed, add `&maponly` to hide the toolbar menu
 https://viewer.geolibre.app/?url=https://share.geolibre.app/giswqs/3d-tiles.geolibre.json&maponly
 ```
 
-| Parameter | Example | Description |
-| --- | --- | --- |
-| `url` | `url=https://share.geolibre.app/giswqs/3d-tiles.geolibre.json` | Loads a `.geolibre.json` project from a public URL. |
-| `layout` | `layout=compact` | Uses the compact embed layout with icon-only toolbar buttons and hidden project metadata. `embed` and `iframe` are aliases. |
-| `toolbar` | `toolbar=icons` | Shows icon-only toolbar buttons without enabling the full compact layout. |
-| `panels` | `panels=none` | Hides the Layers, Style, and Attribute table panels. `hidden`, `hide`, and `off` are aliases. |
-| `hidePanels` | `hidePanels=true` | Alternative way to hide the Layers, Style, and Attribute table panels. |
-| `maponly` | `maponly` | Hides all chrome (toolbar menu, Layers/Style/Attribute panels, and status bar), leaving only the map. The bare flag or any of `true`, `1`, `yes`, `on` enable it. |
-| `theme` | `theme=dark` | Sets the initial color theme on load, overriding the OS preference. Accepts `dark` or `light`; the in-app toggle still works afterwards. |
+Other parameters control the toolbar, panels, and theme. See [Embedding & Sharing](user-guide/embedding.md) for the full parameter reference and `<iframe>` examples.
 
 [Open the live demo](https://viewer.geolibre.app/){ .md-button .md-button--primary }
-[Read the architecture](architecture.md){ .md-button }
+[Embedding & Sharing](user-guide/embedding.md){ .md-button }
 
 ## Project status
 
-GeoLibre is an active prototype. Version 0.9.0 includes the map workspace, project format, plugin API, browser vector import, DuckDB-WASM Spatial loading, advanced Add Data workflows, MBTiles desktop support, ArcGIS layers, COG and GeoTIFF raster rendering, PMTiles, Zarr, LiDAR, Gaussian splats, 3D Tiles, WFS layers, delimited text layers, GPX layers, WMS GetFeatureInfo identify, plugin-state persistence, external plugin manifests, dynamic plugin zip loading, map settings, runtime environment variables, inline attribute editing, multiple DuckDB SQL query-result layers, diagnostics, and the Whitebox toolbox. This release adds the SQL Workspace, Planetary Computer and Earth Engine panels, Overture Maps and federal Web Services plugins, the Time Slider plugin for animating time series raster and vector data, plugin-backed Add Raster and Add Vector dialogs, DuckDB layer identify, selection, and attribute table, a Conversion menu (Vector to GeoParquet, Raster to COG), Whitebox batch tools, a consolidated Project menu, a Controls menu (Measure, Bookmark, Minimap, View State), a Print menu, Layout settings, plugin URL query parameters, the `maponly` embed mode, `VITE_DUCKDB_SPATIAL_EXTENSION_PATH` for offline spatial extension loading, and Docker support for the browser app. See the [roadmap](roadmap.md) for planned work on expanded processing pipelines and external plugin distribution.
+GeoLibre 1.0 is a stable prototype. It includes the map workspace, the `.geolibre.json` project format with Save, Open, and Share, the plugin API, and the plugin marketplace for installing, updating, and removing external plugins. Data support spans browser vector import, DuckDB-WASM Spatial loading, the full Add Data surface (files, web services, cloud formats, 3D layers, and databases), and cloud integrations through the Planetary Computer and Earth Engine panels, the Overture Maps plugin, and the federal Web Services plugins. Processing covers the vector tools (Turf.js with an optional GeoPandas sidecar), the raster tools (rasterio sidecar), the Conversion menu (GeoParquet, FlatGeobuf, PMTiles, COG), the Whitebox toolbox, and the SQL Workspace for DuckDB Spatial SQL. The release also ships the Time Slider plugin, a Controls menu (Measure, Bookmark, Minimap, View State), a Print menu, Layout settings, runtime environment variables, diagnostics, embed-friendly URL parameters including the `maponly` mode, cross-platform installers, and Docker support for the browser app. See the [roadmap](roadmap.md) for the full release history and what comes next.
