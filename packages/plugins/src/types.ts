@@ -59,6 +59,22 @@ export interface GeoLibreAppAPI {
   getActiveBasemap: () => string;
   onBasemapChange: (callback: (styleUrl: string) => void) => () => void;
   fetchArrayBuffer?: (url: string) => Promise<ArrayBuffer>;
+  /**
+   * Resolve a fetchable URL for an asset shipped alongside an external
+   * plugin's manifest (e.g. sample data bundled in the plugin folder). The
+   * host resolves `relativePath` against the plugin's own directory. Returns
+   * null for built-in plugins, for plugins installed from the desktop
+   * filesystem (which have no URL base), or when `relativePath` escapes the
+   * plugin directory. `pluginId` should be the calling plugin's own id; since
+   * all plugins share one JS context the host cannot verify the caller, so this
+   * is a convention rather than an enforced boundary. It is not a privilege
+   * boundary: the resolved URL grants no access a plugin does not already have,
+   * since any plugin can fetch any same-origin URL directly.
+   */
+  resolvePluginAssetUrl?: (
+    pluginId: string,
+    relativePath: string,
+  ) => string | null;
   fitBounds?: (bounds: [number, number, number, number]) => void;
   getMap?: () => MapLibreMap | null;
   pickLocalDirectoryFiles?: () => Promise<File[] | null>;
