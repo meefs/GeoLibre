@@ -132,12 +132,19 @@ import type { ThemeMode } from "../../hooks/useThemeMode";
 import {
   isHttpUrl,
   isTauri,
+  openLocalDataFileWithFallback,
   openProjectFile,
   openRecentProjectFile,
   RecentProjectGoneError,
   saveProjectFile,
   saveProjectFileToPath,
 } from "../../lib/tauri-io";
+import {
+  addOsmPbfLayers,
+  loadOsmPbf,
+  osmPbfBaseName,
+  OSM_PBF_SIZE_WARN_BYTES,
+} from "../../lib/osm-pbf-loader";
 import { mergeStringLists } from "../../lib/string-lists";
 import { normalizeProjectUrl } from "../../lib/urls";
 import { resolveProjectXyzLayers } from "../../lib/xyz-url";
@@ -201,6 +208,10 @@ const PLUGIN_POSITION_ITEMS: Array<{
 const WEB_SERVICE_PLUGIN_ID_SET = new Set<string>(WEB_SERVICE_PLUGIN_IDS);
 
 const FEEDBACK_URL = "https://github.com/opengeos/GeoLibre/issues";
+// A small (~350 KB) CORS-enabled Las Vegas Strip sample, so the URL field works
+// out of the box on both the desktop and web builds.
+const DEFAULT_OSM_PBF_URL =
+  "https://data.source.coop/giswqs/opengeos/LasVegas.osm.pbf";
 
 async function openExternalLink(url: string): Promise<void> {
   if (isTauri()) {
@@ -281,6 +292,16 @@ export function TopToolbar({
   const [projectUrlError, setProjectUrlError] = useState<string | null>(null);
   const [projectUrlLoading, setProjectUrlLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [osmPbfLoading, setOsmPbfLoading] = useState(false);
+  const osmPbfAbortRef = useRef<AbortController | null>(null);
+  const [osmPbfDialogOpen, setOsmPbfDialogOpen] = useState(false);
+  const [osmPbfUrl, setOsmPbfUrl] = useState(DEFAULT_OSM_PBF_URL);
+  const [osmPbfConfirm, setOsmPbfConfirm] = useState<{
+    data: ArrayBuffer;
+    baseName: string;
+    sourcePath: string;
+    sizeMb: number;
+  } | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [checkForUpdatesRequest, setCheckForUpdatesRequest] = useState(0);
   const projectUrlAbortRef = useRef<AbortController | null>(null);
@@ -517,6 +538,123 @@ export function TopToolbar({
   };
   const handleAddVectorLayer = () => {
     openVectorLayerPanel(appApi);
+  };
+  const runOsmPbf = async (
+    data: ArrayBuffer,
+    baseName: string,
+    sourcePath: string,
+  ) => {
+    // Reuse a controller already started for the URL fetch, else make one, so
+    // the loading dialog's Cancel/dismiss can abort the in-flight parse.
+    const controller = osmPbfAbortRef.current ?? new AbortController();
+    osmPbfAbortRef.current = controller;
+    if (controller.signal.aborted) {
+      osmPbfAbortRef.current = null;
+      setOsmPbfLoading(false);
+      return;
+    }
+    setOsmPbfLoading(true);
+    try {
+      const layers = await loadOsmPbf(data, controller.signal);
+      const added = addOsmPbfLayers(
+        appApi.addGeoJsonLayer,
+        baseName,
+        sourcePath,
+        layers,
+      );
+      if (added === 0) {
+        setActionError(
+          "No point, line, or polygon features were found in this OSM PBF file.",
+        );
+      } else if (layers.bounds) {
+        appApi.fitBounds?.(layers.bounds);
+      }
+    } catch (err) {
+      // A user cancel (abort) is not an error.
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      const base =
+        err instanceof Error ? err.message : "Could not load the OSM PBF file.";
+      // Bare .pbf is also the Mapbox Vector Tile extension; hint at it on failure.
+      setActionError(
+        `${base} If this is a Mapbox Vector Tile (.pbf), it cannot be loaded as an OSM extract.`,
+      );
+    } finally {
+      setOsmPbfLoading(false);
+      if (osmPbfAbortRef.current === controller) osmPbfAbortRef.current = null;
+    }
+  };
+  const cancelOsmPbf = () => {
+    osmPbfAbortRef.current?.abort();
+    osmPbfAbortRef.current = null;
+    setOsmPbfLoading(false);
+  };
+  // Large extracts can exhaust browser memory; confirm before parsing.
+  const startOsmPbf = (
+    data: ArrayBuffer,
+    baseName: string,
+    sourcePath: string,
+  ) => {
+    if (data.byteLength >= OSM_PBF_SIZE_WARN_BYTES) {
+      setOsmPbfConfirm({
+        data,
+        baseName,
+        sourcePath,
+        sizeMb: Math.round(data.byteLength / (1024 * 1024)),
+      });
+      return;
+    }
+    void runOsmPbf(data, baseName, sourcePath);
+  };
+  const handleChooseOsmPbfFile = async () => {
+    setOsmPbfDialogOpen(false);
+    try {
+      const result = await openLocalDataFileWithFallback({
+        filters: [{ name: "OSM PBF", extensions: ["pbf", "osm.pbf"] }],
+        accept: ".pbf,.osm.pbf",
+        readBinary: true,
+      });
+      if (!result?.data) return;
+      const fileName = result.path.split(/[/\\]/).pop() || "osm";
+      startOsmPbf(result.data, osmPbfBaseName(fileName), result.path);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Could not open the OSM PBF file.",
+      );
+    }
+  };
+  const handleLoadOsmPbfUrl = async () => {
+    const url = osmPbfUrl.trim();
+    if (!isHttpUrl(url)) {
+      setActionError("Enter a valid http(s) URL to an .osm.pbf file.");
+      return;
+    }
+    setOsmPbfDialogOpen(false);
+    // Start the controller before the fetch so a dismiss during download is
+    // honored (the download itself isn't abortable through the shared fetcher,
+    // but we drop the result instead of parsing/adding it).
+    const controller = new AbortController();
+    osmPbfAbortRef.current = controller;
+    setOsmPbfLoading(true);
+    try {
+      const data = await appApi.fetchArrayBuffer?.(url);
+      if (controller.signal.aborted) return;
+      if (!data) throw new Error("Could not download the OSM PBF file.");
+      const fileName =
+        url.split("/").pop()?.split("?")[0].split("#")[0] || "osm";
+      // Keep the loading indicator up through the parse for small files
+      // (runOsmPbf re-sets it and clears it in finally); only stop it here when
+      // a large file will instead show the confirm dialog, to avoid a flicker.
+      if (data.byteLength >= OSM_PBF_SIZE_WARN_BYTES) setOsmPbfLoading(false);
+      startOsmPbf(data, osmPbfBaseName(fileName), url);
+    } catch (err) {
+      setOsmPbfLoading(false);
+      if (osmPbfAbortRef.current === controller) osmPbfAbortRef.current = null;
+      setActionError(
+        err instanceof Error
+          ? err.message
+          : "Could not download the OSM PBF file.",
+      );
+    }
   };
   const searchPlacesVisible = useSyncExternalStore(
     subscribeSearchPlacesPanel,
@@ -839,6 +977,12 @@ export function TopToolbar({
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => setAddDataKind("mbtiles")}>
             MBTiles Layer
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={osmPbfLoading || osmPbfConfirm !== null}
+            onSelect={() => setOsmPbfDialogOpen(true)}
+          >
+            OSM PBF Layer
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuLabel className="text-xs text-muted-foreground">
@@ -1377,6 +1521,112 @@ export function TopToolbar({
           </DialogHeader>
           <div className="flex justify-end">
             <Button onClick={() => setActionError(null)}>Dismiss</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={osmPbfConfirm !== null}
+        onOpenChange={(open: boolean) => {
+          if (!open) setOsmPbfConfirm(null);
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Large OSM PBF file</DialogTitle>
+            <DialogDescription>
+              {`This file is about ${osmPbfConfirm?.sizeMb} MB. Parsing it converts every feature to GeoJSON in memory, which can be slow and may use a lot of memory in the browser. Continue?`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setOsmPbfConfirm(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const pending = osmPbfConfirm;
+                setOsmPbfConfirm(null);
+                if (pending) {
+                  void runOsmPbf(
+                    pending.data,
+                    pending.baseName,
+                    pending.sourcePath,
+                  );
+                }
+              }}
+            >
+              Continue
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={osmPbfDialogOpen}
+        onOpenChange={(open: boolean) => setOsmPbfDialogOpen(open)}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add OSM PBF Layer</DialogTitle>
+            <DialogDescription>
+              Load an OpenStreetMap .osm.pbf file. It is parsed in your browser
+              and split into separate point, line, and polygon layers.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-3"
+            onSubmit={(event: FormEvent) => {
+              event.preventDefault();
+              void handleLoadOsmPbfUrl();
+            }}
+          >
+            <div className="space-y-1.5">
+              <Label htmlFor="osm-pbf-url">URL</Label>
+              <Input
+                id="osm-pbf-url"
+                type="url"
+                placeholder={DEFAULT_OSM_PBF_URL}
+                value={osmPbfUrl}
+                onChange={(e) => setOsmPbfUrl(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Remote URLs load in the desktop app; in the browser the server
+                must allow cross-origin requests (CORS).
+              </p>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void handleChooseOsmPbfFile()}
+              >
+                Choose local file…
+              </Button>
+              <Button type="submit" disabled={!osmPbfUrl.trim()}>
+                Load from URL
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={osmPbfLoading}
+        onOpenChange={(open: boolean) => {
+          // Dismissing (Escape/backdrop) cancels: abort the worker parse and
+          // drop a pending fetch result so no layers are added after dismissal.
+          if (!open) cancelOsmPbf();
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Loading OSM PBF…</DialogTitle>
+            <DialogDescription>
+              Parsing the file and converting features to GeoJSON. This runs in
+              the background and may take a moment for large extracts.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end">
+            <Button variant="outline" onClick={cancelOsmPbf}>
+              Cancel
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

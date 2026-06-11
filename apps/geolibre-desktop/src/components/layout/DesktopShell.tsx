@@ -36,6 +36,13 @@ import {
   type DroppedRaster,
 } from "../../lib/tauri-io";
 import {
+  addOsmPbfLayers,
+  isOsmPbfFileName,
+  loadOsmPbf,
+  osmPbfBaseName,
+  OSM_PBF_SIZE_WARN_BYTES,
+} from "../../lib/osm-pbf-loader";
+import {
   createAppAPI,
   getPluginManager,
   useExternalPluginsReady,
@@ -483,10 +490,88 @@ export function DesktopShell({
 
           try {
             const paths = event.payload.paths;
-            const rasterCount = await addDroppedRasters(
-              await loadDroppedRasterPaths(paths),
+            // OSM PBF files split into three layers, so they bypass the normal
+            // single-FeatureCollection pipeline (which would otherwise route a
+            // .pbf to DuckDB ST_Read and merge it).
+            const pbfPaths = paths.filter((path) => isOsmPbfFileName(path));
+            const otherPaths = paths.filter(
+              (path) => !isOsmPbfFileName(path),
             );
-            finishDrop(await loadDroppedVectorPaths(paths), rasterCount);
+
+            if (pbfPaths.length > 0) {
+              const { readFile, stat } = await import("@tauri-apps/plugin-fs");
+              for (const path of pbfPaths) {
+                const name = path.split(/[/\\]/).pop() || "osm";
+                try {
+                  // Check the size via metadata before reading the file into
+                  // memory, so the guard runs before a huge extract is loaded.
+                  const { size } = await stat(path);
+                  if (size >= OSM_PBF_SIZE_WARN_BYTES) {
+                    const sizeMb = Math.round(size / (1024 * 1024));
+                    // window.confirm is blocking and adequate here; note that a
+                    // few webview builds may suppress JS dialogs, in which case
+                    // it returns false and the file is skipped.
+                    if (
+                      !window.confirm(
+                        `${name} is about ${sizeMb} MB. Parsing it may use a lot of memory. Continue?`,
+                      )
+                    ) {
+                      continue;
+                    }
+                  }
+                  setDropMessage(`Parsing ${name}…`);
+                  const bytes = await readFile(path);
+                  // Guard against a subview Uint8Array: .buffer would include
+                  // extra bytes and corrupt the parse, so slice to the exact view.
+                  const buffer =
+                    bytes.byteOffset === 0 &&
+                    bytes.byteLength === bytes.buffer.byteLength
+                      ? (bytes.buffer as ArrayBuffer)
+                      : (bytes.buffer.slice(
+                          bytes.byteOffset,
+                          bytes.byteOffset + bytes.byteLength,
+                        ) as ArrayBuffer);
+                  const layers = await loadOsmPbf(buffer);
+                  const added = addOsmPbfLayers(
+                    addGeoJsonLayer,
+                    osmPbfBaseName(name),
+                    path,
+                    layers,
+                  );
+                  if (added > 0 && layers.bounds) {
+                    mapControllerRef.current?.fitBounds(layers.bounds);
+                  }
+                  setDropMessage(
+                    added > 0
+                      ? `Added ${added} layer${added === 1 ? "" : "s"} from ${name}.`
+                      : `No features found in ${name}.`,
+                  );
+                } catch (err) {
+                  // Isolate per-file failures so one bad PBF doesn't abandon the
+                  // rest of the drop.
+                  setDropMessage(null);
+                  setDropError(
+                    `Could not parse ${name}: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                }
+              }
+            }
+
+            if (otherPaths.length > 0) {
+              const rasterCount = await addDroppedRasters(
+                await loadDroppedRasterPaths(otherPaths),
+              );
+              const importedLayers = await loadDroppedVectorPaths(otherPaths);
+              // See the browser handler: skip finishDrop's empty-input error
+              // when PBF files were present (even if rejected/failed).
+              if (
+                importedLayers.length > 0 ||
+                rasterCount > 0 ||
+                pbfPaths.length === 0
+              ) {
+                finishDrop(importedLayers, rasterCount);
+              }
+            }
           } catch (error) {
             setDropMessage(null);
             setDropError(
@@ -514,7 +599,7 @@ export function DesktopShell({
       disposed = true;
       unlisten?.();
     };
-  }, [clearDropMessageLater, finishDrop, addDroppedRasters]);
+  }, [clearDropMessageLater, finishDrop, addDroppedRasters, addGeoJsonLayer]);
 
   const handleDragEnter = useCallback((event: DragEvent<HTMLDivElement>) => {
     if (!hasDroppedFiles(event)) return;
@@ -546,11 +631,77 @@ export function DesktopShell({
       setDropMessage("Importing data...");
 
       try {
-        const files = event.dataTransfer.files;
-        const rasterCount = await addDroppedRasters(
-          loadDroppedRasterFiles(files),
+        const allFiles = Array.from(event.dataTransfer.files);
+        // OSM PBF files produce three separate layers (points/lines/polygons),
+        // so they bypass the single-FeatureCollection vector drop pipeline.
+        // Handle them first, then run the rest through the normal pipeline —
+        // finishDrop throws on an empty list, so only call it when non-PBF
+        // files were dropped.
+        const pbfFiles = allFiles.filter((file) => isOsmPbfFileName(file.name));
+        const otherFiles = allFiles.filter(
+          (file) => !isOsmPbfFileName(file.name),
         );
-        finishDrop(await loadDroppedVectorFiles(files), rasterCount);
+
+        for (const file of pbfFiles) {
+          // Mirror the file-picker path's large-file guard (parsing a huge
+          // extract can exhaust memory even off the main thread).
+          if (file.size >= OSM_PBF_SIZE_WARN_BYTES) {
+            const sizeMb = Math.round(file.size / (1024 * 1024));
+            if (
+              !window.confirm(
+                `${file.name} is about ${sizeMb} MB. Parsing it may use a lot of memory. Continue?`,
+              )
+            ) {
+              continue;
+            }
+          }
+          setDropMessage(`Parsing ${file.name}…`);
+          let layers;
+          try {
+            layers = await loadOsmPbf(await file.arrayBuffer());
+          } catch (err) {
+            // Isolate per-file failures so one bad PBF doesn't abandon the rest
+            // of the drop (including any co-dropped non-PBF files).
+            setDropMessage(null);
+            setDropError(
+              `Could not parse ${file.name}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            continue;
+          }
+          const added = addOsmPbfLayers(
+            addGeoJsonLayer,
+            osmPbfBaseName(file.name),
+            file.name,
+            layers,
+          );
+          if (added > 0 && layers.bounds) {
+            mapControllerRef.current?.fitBounds(layers.bounds);
+          }
+          setDropMessage(
+            added > 0
+              ? `Added ${added} layer${added === 1 ? "" : "s"} from ${file.name}.`
+              : `No features found in ${file.name}.`,
+          );
+        }
+
+        if (otherFiles.length > 0) {
+          const rasterCount = await addDroppedRasters(
+            loadDroppedRasterFiles(otherFiles),
+          );
+          const importedLayers = await loadDroppedVectorFiles(otherFiles);
+          // Call finishDrop (which reports success or throws the empty-input
+          // error) only when the other files produced something, or when the
+          // drop contained no PBF files at all. If PBF files were present —
+          // even if they were all rejected or failed — its empty-input error
+          // would wrongly clobber the PBF outcome.
+          if (
+            importedLayers.length > 0 ||
+            rasterCount > 0 ||
+            pbfFiles.length === 0
+          ) {
+            finishDrop(importedLayers, rasterCount);
+          }
+        }
       } catch (error) {
         setDropMessage(null);
         setDropError(
@@ -560,7 +711,7 @@ export function DesktopShell({
         clearDropMessageLater();
       }
     },
-    [clearDropMessageLater, finishDrop, addDroppedRasters],
+    [clearDropMessageLater, finishDrop, addDroppedRasters, addGeoJsonLayer],
   );
 
   const startLayerPanelResize = useCallback(
