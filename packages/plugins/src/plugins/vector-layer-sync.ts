@@ -1,6 +1,7 @@
 import {
   DEFAULT_LAYER_STYLE,
   type GeoLibreLayer,
+  type LayerStyle,
   useAppStore,
 } from "@geolibre/core";
 import type {
@@ -22,6 +23,7 @@ export type VectorSyncableControl = {
   removeLayer: (id: string) => void;
   setLayerOpacity: (id: string, opacity: number) => void;
   setLayerVisibility: (id: string, visible: boolean) => void;
+  setLayerStyle: (id: string, style: Partial<VectorLayerStyle>) => void;
 };
 
 let syncedControl: VectorSyncableControl | null = null;
@@ -80,7 +82,10 @@ export function createVectorStoreLayer(
     },
     visible: info.visible,
     opacity: info.opacity,
-    style: { ...DEFAULT_LAYER_STYLE },
+    // Seed the panel style from the control's own style so the Style panel
+    // reflects what is actually rendered, and so an edit to one field does
+    // not reset the others back to GeoLibre defaults.
+    style: { ...DEFAULT_LAYER_STYLE, ...vectorStyleToLayerStyle(info) },
     metadata: {
       customLayerType: vectorCustomLayerType(info.geometryType),
       externalNativeLayer: true,
@@ -217,6 +222,32 @@ export function wireVectorStoreSync(control: VectorSyncableControl): void {
         }
         if (current.opacity !== layer.opacity) {
           activeControl.setLayerOpacity(layer.id, current.opacity);
+        }
+        const nextStyle = layerStyleToVectorStyle(current.style);
+        if (!vectorStylesEqual(layerStyleToVectorStyle(layer.style), nextStyle)) {
+          activeControl.setLayerStyle(layer.id, nextStyle);
+          // Keep the persisted control-seed style in sync so a saved project
+          // restores the user-edited colors: restoreVectorLayers seeds the
+          // control's addData from metadata.vectorState.style. (The control's
+          // layerupdated event would normally refresh this via
+          // syncVectorLayersToStore, but the suspension around this push
+          // suppresses it.)
+          const vectorState = current.metadata.vectorState;
+          if (
+            vectorState &&
+            typeof vectorState === "object" &&
+            !Array.isArray(vectorState)
+          ) {
+            useAppStore.getState().updateLayer(layer.id, {
+              metadata: {
+                ...current.metadata,
+                vectorState: {
+                  ...(vectorState as Record<string, unknown>),
+                  style: nextStyle,
+                },
+              },
+            });
+          }
         }
       }
     });
@@ -392,6 +423,90 @@ function savedVectorStyle(raw: unknown): Partial<VectorLayerStyle> | null {
   }
 
   return Object.keys(style).length > 0 ? style : null;
+}
+
+/**
+ * Maps GeoLibre's shared LayerStyle onto the control's per-geometry
+ * VectorLayerStyle. GeoLibre exposes one fillColor/strokeColor/fillOpacity/
+ * strokeWidth for every geometry, so the fill fields also drive point circles
+ * and the stroke fields drive lines and polygon outlines; the control applies
+ * only the fields relevant to each layer's actual geometry.
+ *
+ * The collapse is intentionally lossy: circleColor/circleOpacity always track
+ * fillColor/fillOpacity. Single-geometry layers round-trip cleanly; a "mixed"
+ * layer's point circles unify with its fill from the first panel edit onward,
+ * since GeoLibre has no separate point-fill control.
+ *
+ * @param style - The GeoLibre layer style.
+ * @returns The equivalent control style patch.
+ */
+function layerStyleToVectorStyle(style: LayerStyle): VectorLayerStyle {
+  return {
+    fillColor: style.fillColor,
+    fillOpacity: style.fillOpacity,
+    lineColor: style.strokeColor,
+    lineWidth: style.strokeWidth,
+    // circleColor/circleOpacity intentionally track fillColor/fillOpacity (see
+    // the doc comment): one fill edit drives both polygon fills and point
+    // circles on mixed layers. Pure polygon/line layers ignore these fields;
+    // pure point layers ignore fillColor/fillOpacity instead.
+    circleColor: style.fillColor,
+    circleOpacity: style.fillOpacity,
+    circleRadius: style.circleRadius,
+  };
+}
+
+/**
+ * Seeds a GeoLibre LayerStyle from the control's VectorLayerStyle so the Style
+ * panel reflects what the control actually rendered. Collapses the control's
+ * per-geometry colors onto GeoLibre's shared fields, choosing the fill source
+ * by geometry (point circles use the circle fill; everything else the polygon
+ * fill).
+ *
+ * @param info - The control layer snapshot.
+ * @returns A partial GeoLibre style to overlay on the defaults.
+ */
+function vectorStyleToLayerStyle(info: VectorLayerInfo): Partial<LayerStyle> {
+  const style = info.style;
+  // Only emit fields the control actually provided; otherwise a missing value
+  // would spread an explicit `undefined` over DEFAULT_LAYER_STYLE at the seed
+  // site and clobber a valid default.
+  const seed: Partial<LayerStyle> = {};
+  if (style.lineColor !== undefined) seed.strokeColor = style.lineColor;
+  if (style.lineWidth !== undefined) seed.strokeWidth = style.lineWidth;
+  if (style.circleRadius !== undefined) seed.circleRadius = style.circleRadius;
+
+  const [fillColor, fillOpacity] =
+    info.geometryType === "point"
+      ? [style.circleColor, style.circleOpacity]
+      : [style.fillColor, style.fillOpacity];
+  if (fillColor !== undefined) seed.fillColor = fillColor;
+  if (fillOpacity !== undefined) seed.fillOpacity = fillOpacity;
+
+  return seed;
+}
+
+/**
+ * Shallow equality over the control style fields, so a no-op style change in
+ * the store does not push a redundant setLayerStyle at the control.
+ *
+ * @param left - First control style.
+ * @param right - Second control style.
+ * @returns True when every field matches.
+ */
+function vectorStylesEqual(
+  left: VectorLayerStyle,
+  right: VectorLayerStyle,
+): boolean {
+  return (
+    left.fillColor === right.fillColor &&
+    left.fillOpacity === right.fillOpacity &&
+    left.lineColor === right.lineColor &&
+    left.lineWidth === right.lineWidth &&
+    left.circleColor === right.circleColor &&
+    left.circleOpacity === right.circleOpacity &&
+    left.circleRadius === right.circleRadius
+  );
 }
 
 function vectorCustomLayerType(
