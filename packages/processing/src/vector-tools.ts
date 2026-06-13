@@ -3,6 +3,7 @@ import centroid from "@turf/centroid";
 import convex from "@turf/convex";
 import dissolve from "@turf/dissolve";
 import envelope from "@turf/envelope";
+import flatten from "@turf/flatten";
 import simplify from "@turf/simplify";
 import intersect from "@turf/intersect";
 import difference from "@turf/difference";
@@ -109,6 +110,60 @@ function mergePolygons(
     if (next) merged = next as Feature<Polygon | MultiPolygon>;
   }
   return merged;
+}
+
+/** Summary statistics for Aggregate by attribute; kept in sync with the backend. */
+const AGGREGATE_STATS = new Set([
+  "count",
+  "sum",
+  "mean",
+  "min",
+  "max",
+  "median",
+]);
+
+/**
+ * Coerce a property value to a finite number the way pandas' ``to_numeric`` does
+ * for the aggregate engine: real numbers pass through, booleans map to 1/0 (as
+ * pandas' `to_numeric` does), numeric strings parse (decimal/scientific only —
+ * see {@link parseFiniteNumber}), and everything else (null, NaN, text, objects)
+ * becomes null and is skipped by the reducers, matching pandas' default skipna
+ * behaviour.
+ */
+function toNumeric(value: unknown): number | null {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const n = parseFiniteNumber(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Reduce a group's numeric values with one statistic, mirroring pandas:
+ * ``sum`` of an empty group is 0 (skipna), while ``mean``/``min``/``max``/
+ * ``median`` of an empty group are null (NaN → null in GeoJSON). ``count`` is
+ * handled by the caller (it counts features, not numeric values).
+ */
+function computeStat(nums: number[], statistic: string): number | null {
+  if (statistic === "sum") return nums.reduce((a, b) => a + b, 0);
+  if (!nums.length) return null;
+  if (statistic === "mean")
+    return nums.reduce((a, b) => a + b, 0) / nums.length;
+  // reduce, not Math.min/max(...nums): the spread passes every element as an
+  // argument and a tens-of-thousands-element group would exceed the engine's
+  // argument-count limit and throw.
+  if (statistic === "min") return nums.reduce((a, b) => (a < b ? a : b));
+  if (statistic === "max") return nums.reduce((a, b) => (a > b ? a : b));
+  if (statistic === "median") {
+    const sorted = [...nums].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2
+      ? sorted[mid]
+      : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return null;
 }
 
 export const bufferTool: ProcessingAlgorithm = {
@@ -984,6 +1039,206 @@ export const selectByLocationTool: ProcessingAlgorithm = {
   },
 };
 
+export const reprojectTool: ProcessingAlgorithm = {
+  id: "reproject",
+  name: "Reproject",
+  description:
+    "Reinterpret a layer's coordinates as a source CRS and transform them to WGS84 so they display in the correct location. Requires the Sidecar or Python engine.",
+  group: "Geometry",
+  supportsSidecar: true,
+  requiresSidecar: true,
+  parameters: [
+    { id: "layer", label: "Input layer", type: "layer", required: true },
+    {
+      id: "source_crs",
+      label: "Source CRS",
+      type: "string",
+      required: true,
+      default: "EPSG:3857",
+      description:
+        "The CRS the layer's coordinates are really in (e.g. EPSG:3857). The result is transformed to WGS84 (EPSG:4326).",
+    },
+  ],
+  run: (ctx) => {
+    // GeoLibre layers are WGS84 GeoJSON, and real CRS math needs pyproj, so the
+    // client (Turf.js) engine cannot reproject. Point the user at the engines
+    // that share the backend's _reproject (Sidecar/GeoPandas or Pyodide).
+    ctx.log(
+      'Reproject runs on the Python engine. Choose "Sidecar (GeoPandas)" or ' +
+        '"Python (Pyodide)" in the Engine selector above, then run again.',
+    );
+  },
+};
+
+export const explodeTool: ProcessingAlgorithm = {
+  id: "explode",
+  name: "Explode",
+  description:
+    "Split multipart geometries into single-part features (one feature per part), keeping each parent's attributes",
+  group: "Geometry",
+  supportsSidecar: true,
+  parameters: [
+    { id: "layer", label: "Input layer", type: "layer", required: true },
+  ],
+  run: (ctx) => {
+    const fc = requireFeatures(ctx);
+    if (!fc) return;
+    // Turf's flatten splits Multi* and GeometryCollection features into their
+    // single-part components, copying properties — matching GeoPandas explode().
+    const exploded = flatten(fc);
+    ctx.log(
+      `Exploded ${fc.features.length} feature(s) into ${exploded.features.length} single-part feature(s)`,
+    );
+    ctx.addResultLayer?.("Explode", exploded);
+  },
+};
+
+export const aggregateTool: ProcessingAlgorithm = {
+  id: "aggregate",
+  name: "Aggregate by attribute",
+  description:
+    "Dissolve features that share an attribute value into one geometry per group, with a summary statistic",
+  group: "Geometry",
+  supportsSidecar: true,
+  parameters: [
+    {
+      id: "layer",
+      label: "Input layer",
+      type: "layer",
+      required: true,
+      geometryFilter: ["polygon"],
+    },
+    {
+      id: "group_field",
+      label: "Group by field",
+      type: "field",
+      fieldSource: "layer",
+      required: true,
+    },
+    {
+      id: "statistic",
+      label: "Statistic",
+      type: "select",
+      default: "count",
+      options: [
+        { value: "count", label: "Count" },
+        { value: "sum", label: "Sum" },
+        { value: "mean", label: "Mean" },
+        { value: "min", label: "Min" },
+        { value: "max", label: "Max" },
+        { value: "median", label: "Median" },
+      ],
+    },
+    {
+      id: "stat_field",
+      label: "Statistic field",
+      type: "field",
+      fieldSource: "layer",
+      required: true,
+      description: "Numeric field summarized by the statistic above.",
+      // Count needs no field; every other statistic reduces this numeric field.
+      visibleWhen: { param: "statistic", notIn: ["count"] },
+    },
+  ],
+  run: (ctx) => {
+    const fc = requireFeatures(ctx);
+    if (!fc) return;
+    const groupField = (ctx.parameters.group_field as string)?.trim();
+    if (!groupField) {
+      ctx.log("Error: a group field is required");
+      return;
+    }
+    // Mirror the backend's `group_field not in gdf.columns` guard: if no feature
+    // carries the field at all, fail rather than producing a single empty bucket.
+    const hasGroupField = fc.features.some((f) =>
+      Object.prototype.hasOwnProperty.call(f.properties ?? {}, groupField),
+    );
+    if (!hasGroupField) {
+      ctx.log(`Error: group field '${groupField}' not found in layer attributes.`);
+      return;
+    }
+    const statistic = (ctx.parameters.statistic as string) || "count";
+    if (!AGGREGATE_STATS.has(statistic)) {
+      ctx.log(`Error: unknown statistic '${statistic}'`);
+      return;
+    }
+    const statField = (ctx.parameters.stat_field as string)?.trim();
+    if (statistic !== "count" && !statField) {
+      ctx.log(`Error: a statistic field is required for '${statistic}'`);
+      return;
+    }
+    // Both engines restrict Aggregate to polygons (the layer picker filters to
+    // polygon layers, and the sidecar drops non-polygons too), so count and the
+    // numeric stats stay in sync. Group the polygon features, then union each
+    // group's polygons for the output geometry.
+    const groups = new Map<
+      string,
+      { value: unknown; features: Feature[]; nums: number[]; count: number }
+    >();
+    let skipped = 0;
+    for (const feature of fc.features) {
+      if (!isFamily(feature.geometry, "polygon")) {
+        skipped += 1;
+        continue;
+      }
+      const raw = feature.properties?.[groupField];
+      // Skip features with no group value, matching pandas `groupby` (dropna=True),
+      // so the client never invents a "null" bucket the sidecar wouldn't produce.
+      if (raw === null || raw === undefined) continue;
+      const key = stableStringify(raw);
+      let group = groups.get(key);
+      if (!group) {
+        group = { value: raw, features: [], nums: [], count: 0 };
+        groups.set(key, group);
+      }
+      group.features.push(feature);
+      group.count += 1;
+      if (statistic !== "count" && statField) {
+        const num = toNumeric(feature.properties?.[statField]);
+        if (num !== null) group.nums.push(num);
+      }
+    }
+    const polygonCount = fc.features.length - skipped;
+    if (polygonCount === 0) {
+      ctx.log("Error: Aggregate by attribute requires polygon features");
+      return;
+    }
+    if (!groups.size) {
+      // Polygons exist but every one had a null/undefined group value; the
+      // sidecar (pandas groupby dropna=True) yields an empty grouped result
+      // here, so match it instead of erroring on "no polygons".
+      ctx.log(
+        `Aggregated ${polygonCount} feature(s) into 0 group(s) by '${groupField}'`,
+      );
+      ctx.addResultLayer?.("Aggregate by attribute", featureCollection([]));
+      return;
+    }
+    const outColumn =
+      statistic === "count" ? "count" : `${statField}_${statistic}`;
+    const results: Feature[] = [];
+    for (const group of groups.values()) {
+      // Each group holds only polygon features, so mergePolygons always returns a
+      // geometry; the null check just satisfies its `| null` return type.
+      const merged = mergePolygons(featureCollection(group.features));
+      if (!merged) continue;
+      const statValue =
+        statistic === "count"
+          ? group.count
+          : computeStat(group.nums, statistic);
+      results.push({
+        type: "Feature",
+        properties: { [groupField]: group.value, [outColumn]: statValue },
+        geometry: merged.geometry,
+      });
+    }
+    ctx.log(
+      `Aggregated ${polygonCount} feature(s) into ${results.length} group(s) by '${groupField}'` +
+        (skipped > 0 ? ` (${skipped} skipped, not polygons)` : ""),
+    );
+    ctx.addResultLayer?.("Aggregate by attribute", featureCollection(results));
+  },
+};
+
 export const VECTOR_TOOLS: ProcessingAlgorithm[] = [
   bufferTool,
   centroidsTool,
@@ -998,6 +1253,9 @@ export const VECTOR_TOOLS: ProcessingAlgorithm[] = [
   spatialJoinTool,
   selectByValueTool,
   selectByLocationTool,
+  reprojectTool,
+  explodeTool,
+  aggregateTool,
   createH3GridTool,
   binPointsTool,
 ];

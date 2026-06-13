@@ -290,6 +290,9 @@ const VECTOR_TOOL_COMMANDS: Array<{ kind: VectorToolKind; titleKey: ParseKeys }>
       kind: "select-by-location",
       titleKey: "toolbar.vectorTool.selectByLocation",
     },
+    { kind: "reproject", titleKey: "toolbar.vectorTool.reproject" },
+    { kind: "explode", titleKey: "toolbar.vectorTool.explode" },
+    { kind: "aggregate", titleKey: "toolbar.vectorTool.aggregate" },
     { kind: "h3-grid", titleKey: "toolbar.vectorTool.h3Grid" },
     { kind: "h3-bin-points", titleKey: "toolbar.vectorTool.h3BinPoints" },
   ];
@@ -1702,6 +1705,15 @@ export function TopToolbar({
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setVectorToolOpen("simplify")}>
                 {t("toolbar.vectorTool.simplify")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setVectorToolOpen("reproject")}>
+                {t("toolbar.vectorTool.reproject")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setVectorToolOpen("explode")}>
+                {t("toolbar.vectorTool.explode")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setVectorToolOpen("aggregate")}>
+                {t("toolbar.vectorTool.aggregate")}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel className="text-xs text-muted-foreground">

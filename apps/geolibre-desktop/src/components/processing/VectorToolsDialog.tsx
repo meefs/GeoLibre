@@ -102,7 +102,13 @@ export function VectorToolsDialog({
     }
     setParams(defaults);
     setLog([]);
-    if (!tool.supportsSidecar) setEngine("client");
+    // Pick the engine that can actually run this tool: sidecar-only tools (e.g.
+    // Reproject, whose client run just defers) default to "sidecar" so Run
+    // produces a result without touching the selector; client-only tools force
+    // "client". requiresSidecar is checked first so it wins even if a tool ever
+    // sets it without supportsSidecar (the JSDoc says it implies supportsSidecar).
+    if (tool.requiresSidecar) setEngine("sidecar");
+    else if (!tool.supportsSidecar) setEngine("client");
   }, [tool]);
 
   // Prefill the H3 grid's manual bounding-box fields from the current map
@@ -435,7 +441,7 @@ export function VectorToolsDialog({
               ))}
             </div>
 
-            {tool.supportsSidecar ? (
+            {tool.supportsSidecar || tool.requiresSidecar ? (
               <div className="flex flex-col gap-1">
                 <Label className="flex items-center gap-1.5 text-xs">
                   <Server className="h-3.5 w-3.5" /> Engine
@@ -444,7 +450,11 @@ export function VectorToolsDialog({
                   value={engine}
                   onChange={(e) => setEngine(e.target.value as Engine)}
                 >
-                  <option value="client">Client (Turf.js)</option>
+                  {/* requiresSidecar tools (e.g. Reproject) have no working client
+                      path, so don't let the user pick a dead-end engine. */}
+                  <option value="client" disabled={tool.requiresSidecar}>
+                    Client (Turf.js)
+                  </option>
                   <option value="sidecar">Sidecar (GeoPandas)</option>
                   <option value="pyodide">Python (Pyodide)</option>
                 </Select>
@@ -456,7 +466,10 @@ export function VectorToolsDialog({
                 {engine === "sidecar" && sidecarAvailable === false ? (
                   <p className="text-xs text-destructive">
                     The GeoPandas sidecar is not available. Start the sidecar
-                    with the vector extra, or switch to the client engine.
+                    with the vector extra, or switch to
+                    {tool.requiresSidecar
+                      ? " Python (Pyodide)."
+                      : " the client engine."}
                   </p>
                 ) : null}
                 {engine === "pyodide" ? (
