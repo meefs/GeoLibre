@@ -2,6 +2,7 @@ export * from "./types";
 export * from "./color-ramp";
 export * from "./vector-color";
 export * from "./project";
+export * from "./layer-groups";
 export { createSampleStoryMap } from "./storymap-sample";
 export {
   serializeStoryMapJson,
