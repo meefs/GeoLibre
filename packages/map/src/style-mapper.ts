@@ -1,6 +1,7 @@
 import {
   DEFAULT_LAYER_STYLE,
   parseJsonExpression,
+  simpleStyleNumberValue,
   vectorCircleColorValue,
   vectorColorExpression,
   vectorFillColorValue,
@@ -19,13 +20,31 @@ function styleValue<K extends keyof LayerStyle>(
   return style[key] ?? DEFAULT_LAYER_STYLE[key];
 }
 
+// Fold the layer's opacity multiplier into a paint value that may itself be a
+// data-driven (simplestyle) expression rather than a plain number.
+function scaleByOpacity(
+  value: number | unknown[],
+  opacity: number,
+): PropertyValueSpecification<number> {
+  if (typeof value === "number") return value * opacity;
+  return ["*", value, opacity] as unknown as PropertyValueSpecification<number>;
+}
+
 export function fillPaint(style: LayerStyle, opacity: number) {
   return {
     "fill-color": vectorFillColorValue(
       style,
     ) as PropertyValueSpecification<string>,
-    "fill-opacity": styleValue(style, "fillOpacity") * opacity,
-    "fill-outline-color": styleValue(style, "strokeColor"),
+    "fill-opacity": scaleByOpacity(
+      simpleStyleNumberValue(style, "fill-opacity", styleValue(style, "fillOpacity")),
+      opacity,
+    ),
+    // vectorLineColorValue honors simpleStyle's per-feature stroke property; in
+    // expression mode it also applies the user's expression to the hairline
+    // outline (matching the separate line layer that draws the polygon stroke).
+    "fill-outline-color": vectorLineColorValue(
+      style,
+    ) as PropertyValueSpecification<string>,
   };
 }
 
@@ -79,8 +98,15 @@ export function linePaint(style: LayerStyle, opacity: number) {
     "line-color": vectorLineColorValue(
       style,
     ) as PropertyValueSpecification<string>,
-    "line-width": styleValue(style, "strokeWidth"),
-    "line-opacity": opacity,
+    "line-width": simpleStyleNumberValue(
+      style,
+      "stroke-width",
+      styleValue(style, "strokeWidth"),
+    ) as unknown as PropertyValueSpecification<number>,
+    "line-opacity": scaleByOpacity(
+      simpleStyleNumberValue(style, "stroke-opacity", 1),
+      opacity,
+    ),
   };
 }
 
@@ -90,7 +116,10 @@ export function circlePaint(style: LayerStyle, opacity: number) {
       style,
     ) as PropertyValueSpecification<string>,
     "circle-radius": styleValue(style, "circleRadius"),
-    "circle-opacity": styleValue(style, "fillOpacity") * opacity,
+    "circle-opacity": scaleByOpacity(
+      simpleStyleNumberValue(style, "marker-opacity", styleValue(style, "fillOpacity")),
+      opacity,
+    ),
     "circle-stroke-color": styleValue(style, "strokeColor"),
     "circle-stroke-width": styleValue(style, "strokeWidth"),
   };
