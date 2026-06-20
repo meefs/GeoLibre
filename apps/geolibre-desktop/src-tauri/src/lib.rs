@@ -178,6 +178,7 @@ pub fn run() {
             close_oauth_popups,
             ensure_martin_binary,
             fetch_url_bytes,
+            install_external_plugin_archive,
             load_external_plugin_bundles,
             read_admin_profile,
             read_project_file,
@@ -275,6 +276,93 @@ fn fetch_url_bytes_blocking(url: String) -> Result<Vec<u8>, String> {
         .bytes()
         .map(|bytes| bytes.to_vec())
         .map_err(|error| format!("Could not read response body: {error}"))
+}
+
+/// Install a packaged plugin from a local `.zip` archive into GeoLibre's
+/// app-data `plugins/` directory so it persists across restarts and is picked up
+/// by the regular plugin scan. The archive is validated first (parsing
+/// `plugin.json`, enforcing the manifest rules, and confirming the entry and
+/// optional style are present and within the size limit), so only a loadable
+/// plugin lands in the plugins directory. Returns the installed plugin id.
+#[tauri::command]
+async fn install_external_plugin_archive(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        install_external_plugin_archive_blocking(&app, source_path)
+    })
+    .await
+    .map_err(|error| format!("Plugin install task failed: {error}"))?
+}
+
+fn install_external_plugin_archive_blocking(
+    app: &tauri::AppHandle,
+    source_path: String,
+) -> Result<String, String> {
+    let source = PathBuf::from(&source_path);
+    if !is_zip_path(&source) {
+        return Err("Plugin file must be a .zip archive".to_string());
+    }
+
+    // Validate the archive up front by loading it the same way the startup scan
+    // does; this rejects a malformed manifest, a missing/oversized entry, or an
+    // unsafe asset path before any file is written.
+    let bundle = load_external_plugin_archive(&source, &source_path)?;
+    let plugin_id = bundle.manifest.id;
+
+    let plugins_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?
+        .join("plugins");
+    fs::create_dir_all(&plugins_dir)
+        .map_err(|error| format!("Could not create plugins directory: {error}"))?;
+
+    let destination = plugins_dir.join(plugin_archive_file_name(&plugin_id));
+
+    // Reinstalling from a file already inside the plugins directory (e.g. the
+    // user re-selects the installed copy) would otherwise truncate the source
+    // mid-copy. Treat the no-op copy as a successful install.
+    let same_file = source
+        .canonicalize()
+        .ok()
+        .zip(destination.canonicalize().ok())
+        .map(|(from, to)| from == to)
+        .unwrap_or(false);
+    if !same_file {
+        fs::copy(&source, &destination)
+            .map_err(|error| format!("Could not install plugin archive: {error}"))?;
+    }
+
+    Ok(plugin_id)
+}
+
+/// Build a filesystem-safe `<id>.zip` name for an installed plugin archive.
+///
+/// The manifest `id` is validated for emptiness and whitespace but not for
+/// filesystem safety, so any character outside `[A-Za-z0-9._-]` is replaced with
+/// `_` and leading dots are stripped to keep the name from escaping the plugins
+/// directory or producing a hidden file. Using the id as the file name gives a
+/// reinstall natural overwrite semantics.
+fn plugin_archive_file_name(id: &str) -> String {
+    let sanitized: String = id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+            {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_start_matches('.');
+    let safe = if trimmed.is_empty() { "plugin" } else { trimmed };
+    format!("{safe}.zip")
 }
 
 #[tauri::command]
@@ -429,14 +517,31 @@ fn load_external_plugin_archive(
     let file = File::open(path).map_err(|error| format!("Could not open zip: {error}"))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|error| format!("Could not read zip: {error}"))?;
-    let manifest_text = read_zip_text_entry(&mut archive, "plugin.json", "plugin manifest")?;
+    // Tolerate a wrapping folder (`my-plugin/plugin.json`) as produced by zipping
+    // a plugin directory, not just a root `plugin.json`. The entry/style paths
+    // then resolve against the manifest's own directory.
+    let manifest_path = find_zip_manifest_path(&archive)
+        .ok_or_else(|| "Plugin archive is missing a plugin.json".to_string())?;
+    let prefix = manifest_path
+        .strip_suffix("plugin.json")
+        .unwrap_or("")
+        .to_string();
+    let manifest_text = read_zip_text_entry(&mut archive, &manifest_path, "plugin manifest")?;
     let manifest: ExternalPluginManifest = serde_json::from_str(&manifest_text)
         .map_err(|error| format!("Could not parse plugin.json: {error}"))?;
     validate_external_plugin_manifest(&manifest)?;
 
-    let entry_source = read_zip_text_entry(&mut archive, &manifest.entry, "plugin entry")?;
+    let entry_source = read_zip_text_entry(
+        &mut archive,
+        &format!("{prefix}{}", manifest.entry),
+        "plugin entry",
+    )?;
     let style_source = match manifest.style.as_deref() {
-        Some(style) => Some(read_zip_text_entry(&mut archive, style, "plugin style")?),
+        Some(style) => Some(read_zip_text_entry(
+            &mut archive,
+            &format!("{prefix}{style}"),
+            "plugin style",
+        )?),
         None => None,
     };
 
@@ -446,6 +551,32 @@ fn load_external_plugin_archive(
         entry_source,
         style_source,
     })
+}
+
+/// Find plugin.json inside a zip, tolerating a single wrapping folder. Prefers a
+/// root `plugin.json`, otherwise returns the shallowest `*/plugin.json`, ignoring
+/// the `__MACOSX/` metadata folder macOS adds to archives. Returns the manifest's
+/// full path within the archive, or None when no plugin.json is present.
+fn find_zip_manifest_path<R: Read + std::io::Seek>(
+    archive: &zip::ZipArchive<R>,
+) -> Option<String> {
+    let names: Vec<&str> = archive.file_names().collect();
+    if names.iter().any(|name| *name == "plugin.json") {
+        return Some("plugin.json".to_string());
+    }
+    let mut best: Option<&str> = None;
+    let mut best_depth = usize::MAX;
+    for name in names {
+        if name.starts_with("__MACOSX/") || !name.ends_with("/plugin.json") {
+            continue;
+        }
+        let depth = name.matches('/').count();
+        if depth < best_depth || (depth == best_depth && best.is_none_or(|b| name < b)) {
+            best = Some(name);
+            best_depth = depth;
+        }
+    }
+    best.map(str::to_string)
 }
 
 fn load_external_plugin_directory(
@@ -2178,3 +2309,79 @@ fn configure_linux_webkit() {
 
 #[cfg(not(target_os = "linux"))]
 fn configure_linux_webkit() {}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_zip_manifest_path, plugin_archive_file_name};
+    use std::io::{Cursor, Write};
+
+    fn zip_with_names(names: &[&str]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for name in names {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(b"x").unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn manifest_path(names: &[&str]) -> Option<String> {
+        let bytes = zip_with_names(names);
+        let archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        find_zip_manifest_path(&archive)
+    }
+
+    #[test]
+    fn finds_root_manifest() {
+        assert_eq!(
+            manifest_path(&["plugin.json", "dist/plugin.js"]).as_deref(),
+            Some("plugin.json")
+        );
+    }
+
+    #[test]
+    fn finds_manifest_inside_a_wrapping_folder() {
+        assert_eq!(
+            manifest_path(&["my-plugin/plugin.json", "my-plugin/dist/plugin.js"]).as_deref(),
+            Some("my-plugin/plugin.json")
+        );
+    }
+
+    #[test]
+    fn prefers_root_and_ignores_macosx_metadata() {
+        // A root manifest wins over a deeper one.
+        assert_eq!(
+            manifest_path(&["wrap/plugin.json", "plugin.json"]).as_deref(),
+            Some("plugin.json")
+        );
+        // The __MACOSX folder is skipped, so the real wrapped manifest is found.
+        assert_eq!(
+            manifest_path(&["__MACOSX/wrap/._plugin.json", "wrap/plugin.json"]).as_deref(),
+            Some("wrap/plugin.json")
+        );
+    }
+
+    #[test]
+    fn returns_none_without_a_manifest() {
+        assert_eq!(manifest_path(&["dist/plugin.js"]), None);
+    }
+
+    #[test]
+    fn keeps_safe_plugin_ids() {
+        assert_eq!(plugin_archive_file_name("maplibre-foo"), "maplibre-foo.zip");
+        assert_eq!(plugin_archive_file_name("foo.bar_2"), "foo.bar_2.zip");
+    }
+
+    #[test]
+    fn sanitizes_unsafe_characters_and_traversal() {
+        // Path separators and other characters cannot escape the plugins dir;
+        // leading dots are then stripped, so "../evil" collapses to "_evil".
+        assert_eq!(plugin_archive_file_name("../evil"), "_evil.zip");
+        assert_eq!(plugin_archive_file_name("a/b"), "a_b.zip");
+        // Leading dots are stripped so the archive is never hidden.
+        assert_eq!(plugin_archive_file_name("..hidden"), "hidden.zip");
+        // A name that sanitizes away entirely falls back to a fixed stem.
+        assert_eq!(plugin_archive_file_name("..."), "plugin.zip");
+    }
+}
