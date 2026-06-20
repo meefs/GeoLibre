@@ -21,7 +21,6 @@ import {
   HardDrive,
   HardDriveDownload,
   History,
-  LayoutTemplate,
   Link2,
   Printer,
   Save,
@@ -30,7 +29,6 @@ import {
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { ToolbarPanel } from "../../../hooks/useToolbarPanels";
 import { useDesktopSettingsStore } from "../../../hooks/useDesktopSettings";
 import { isMenuItemVisible } from "../../../lib/ui-profile";
 import { formatRecentProjectTime, type ToolbarChrome } from "./constants";
@@ -38,7 +36,6 @@ import { formatRecentProjectTime, type ToolbarChrome } from "./constants";
 interface ProjectMenuProps {
   chrome: ToolbarChrome;
   collaborationEnabled: boolean;
-  printPanel: ToolbarPanel;
   onNewProject: () => void;
   onOpenFromFile: () => void;
   onOpenFromUrl: () => void;
@@ -56,7 +53,6 @@ interface ProjectMenuProps {
 export function ProjectMenu({
   chrome,
   collaborationEnabled,
-  printPanel,
   onNewProject,
   onOpenFromFile,
   onOpenFromUrl,
@@ -85,7 +81,6 @@ export function ProjectMenu({
     show("project.share") ||
     (collaborationEnabled && show("project.collaborate"));
   const showPrintGroup =
-    show("project.print") ||
     show("project.printLayout") ||
     show("project.offlineRegion") ||
     show("project.offlineManager");
@@ -227,16 +222,9 @@ export function ProjectMenu({
           </DropdownMenuItem>
         )}
         {showPrintGroup && <DropdownMenuSeparator />}
-        {show("project.print") && (
-          <DropdownMenuItem onSelect={printPanel.toggle}>
-            <Printer className="mr-2 h-3.5 w-3.5" />
-            {t("toolbar.item.printEllipsis")}
-            {printPanel.visible ? " ✓" : ""}
-          </DropdownMenuItem>
-        )}
         {show("project.printLayout") && (
           <DropdownMenuItem onSelect={onPrintLayout}>
-            <LayoutTemplate className="mr-2 h-3.5 w-3.5" />
+            <Printer className="mr-2 h-3.5 w-3.5" />
             {t("toolbar.item.printLayoutEllipsis")}
           </DropdownMenuItem>
         )}

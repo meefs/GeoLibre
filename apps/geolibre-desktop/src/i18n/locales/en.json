@@ -502,6 +502,8 @@
     "title": "Print Layout",
     "description": "Compose a print-ready map with a title, legend, scale bar, and north arrow, then export it to PNG or PDF.",
     "preview": "Preview",
+    "resizeControls": "Resize controls panel",
+    "resizeDialog": "Resize dialog",
     "recapture": "Recapture map",
     "exportPng": "Export PNG",
     "exportPdf": "Export PDF",
@@ -543,7 +545,39 @@
       "footer": "Footer text",
       "date": "Date",
       "attribution": "Include GeoLibre attribution",
-      "pageBorder": "Page border"
+      "pageBorder": "Page border",
+      "infoBlock": "Info block (title block)",
+      "colorbar": "Colorbar",
+      "customLegend": "Custom legend"
+    },
+    "customLegend": {
+      "title": "Legend title",
+      "color": "Color",
+      "itemLabel": "Label",
+      "position": "Position",
+      "addItem": "Add item",
+      "removeItem": "Remove item",
+      "importFromDict": "Import from dictionary",
+      "import": "Import",
+      "importError": "Enter a valid {\"label\": \"color\"} dictionary."
+    },
+    "colorbar": {
+      "colormap": "Colormap",
+      "min": "Min value",
+      "max": "Max value",
+      "label": "Label",
+      "labelPlaceholder": "e.g. Elevation (m)",
+      "orientation": "Orientation",
+      "vertical": "Vertical",
+      "horizontal": "Horizontal",
+      "position": "Position",
+      "length": "Length"
+    },
+    "position": {
+      "topLeft": "Top left",
+      "topRight": "Top right",
+      "bottomLeft": "Bottom left",
+      "bottomRight": "Bottom right"
     },
     "footerTextLabel": "Footer text",
     "footerPlaceholder": "Custom footer text",
@@ -552,6 +586,31 @@
       "normal": "Normal",
       "narrow": "Narrow",
       "none": "None (borderless)"
+    },
+    "mapBackground": "Map background",
+    "scaleLabel": "Scale (1:N)",
+    "scalePlaceholder": "e.g. 25000",
+    "scalePresets": "Presets…",
+    "scalePresetsAria": "Scale preset",
+    "extent": {
+      "label": "Print extent",
+      "draw": "Draw extent on map",
+      "redraw": "Redraw extent on map",
+      "useViewport": "Use active viewport",
+      "useCustom": "Clip to custom extent",
+      "clear": "Clear extent",
+      "hint": "Drag a box on the map to set the exact print area. Hold Shift to match the page proportions."
+    },
+    "info": {
+      "author": "Author",
+      "authorPlaceholder": "Author or organization",
+      "project": "Project No.",
+      "projectPlaceholder": "Reference number",
+      "crs": "CRS",
+      "crsPlaceholder": "e.g. EPSG:4326",
+      "scale": "Scale",
+      "revision": "Revision",
+      "revisionPlaceholder": "e.g. Rev 01"
     },
     "borderColor": "Border color",
     "borderWidth": "Border width",
