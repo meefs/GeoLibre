@@ -8,6 +8,7 @@ import {
   parseStoryMapJson,
   serializeStoryMapCsv,
   serializeStoryMapJson,
+  storyMapHasContent,
   useAppStore,
   type StoryChapter,
   type StoryChapterAlignment,
@@ -45,6 +46,7 @@ import {
   MapPin,
   Play,
   Plus,
+  RotateCcw,
   Sparkles,
   Trash2,
   Upload,
@@ -93,6 +95,13 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
 
   const story: StoryMap = storymap ?? DEFAULT_STORY_MAP;
   const chapters = story.chapters;
+  // Reset has something to clear when the story carries chapters or any
+  // non-default setting, so it stays disabled in the empty state (where "Load
+  // sample story" is the relevant action) even if a stale `storymap` object
+  // lingers after the last chapter was deleted manually. Reuse the canonical
+  // check from @geolibre/core so this stays in sync with how the project layer
+  // decides a story is worth persisting.
+  const hasStoryContent = storyMapHasContent(story);
 
   const handleAddChapter = useCallback(() => {
     const view = mapControllerRef.current?.readView();
@@ -126,6 +135,15 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
     const first = sample.chapters[0];
     if (first) mapControllerRef.current?.flyToView(first.location);
   }, [mapControllerRef, setStorymap]);
+
+  const handleReset = useCallback(() => {
+    if (!window.confirm(t("storymap.resetConfirm"))) return;
+    // Clearing the story drops back to the empty default (the panel falls back
+    // to DEFAULT_STORY_MAP when `storymap` is null), so the empty state with the
+    // "Load sample story" button reappears and users can build their own.
+    setStorymap(null);
+    setExpandedId(null);
+  }, [setStorymap, t]);
 
   const handleCaptureView = useCallback(
     (id: string) => {
@@ -319,6 +337,16 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
               <Button size="sm" variant="outline" onClick={handleAddChapter}>
                 <Plus className="mr-1 h-4 w-4" />
                 {t("storymap.addChapter")}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!hasStoryContent}
+                title={t("storymap.resetTitle")}
+                onClick={handleReset}
+              >
+                <RotateCcw className="mr-1 h-4 w-4" />
+                {t("storymap.reset")}
               </Button>
             </div>
           </div>
