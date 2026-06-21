@@ -10,6 +10,7 @@ import { Globe2, Map as MapIcon } from "lucide-react";
 import {
   type FormEvent,
   type ReactNode,
+  useId,
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -73,6 +74,55 @@ export function useAddDataSource(defaultLayerName: string) {
     runSubmit,
     isSubmitting: shell.isSubmitting,
   };
+}
+
+/**
+ * A "Load sample data" dropdown for the Add Data sources. Each entry is a
+ * named preset that fills the source's fields, so a source can ship an empty
+ * input (placeholder only) instead of a prefilled sample URL. Renders nothing
+ * when no samples are supplied, and snaps back to the placeholder after a pick
+ * so it reads as an action menu rather than a sticky selection.
+ *
+ * @param samples - The named presets to offer.
+ * @param onSelect - Applies the chosen preset's value to the source's fields.
+ */
+export function SampleDataSelect<T>({
+  samples,
+  onSelect,
+}: {
+  samples: readonly { label: string; value: T }[];
+  onSelect: (value: T) => void;
+}) {
+  const { t } = useTranslation();
+  const selectId = useId();
+  if (samples.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={selectId}>{t("addData.shared.sampleData")}</Label>
+      <Select
+        id={selectId}
+        value=""
+        onChange={(event) => {
+          // Safety net: the disabled placeholder ("") should never reach here
+          // through real interaction, but ignore an empty value anyway so it
+          // can't coerce (Number("") === 0) to the first sample.
+          const raw = event.target.value;
+          if (!raw) return;
+          const sample = samples[Number(raw)];
+          if (sample) onSelect(sample.value);
+        }}
+      >
+        <option value="" disabled>
+          {t("addData.shared.loadSampleData")}
+        </option>
+        {samples.map((sample, index) => (
+          <option key={sample.label} value={String(index)}>
+            {sample.label}
+          </option>
+        ))}
+      </Select>
+    </div>
+  );
 }
 
 export function LayerNameField({
