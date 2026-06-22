@@ -9,6 +9,9 @@
 [![Conda Recipe](https://img.shields.io/badge/recipe-geolibre-green.svg)](https://github.com/conda-forge/geolibre-feedstock)
 [![Open in CodeSandbox](https://img.shields.io/badge/Open%20in-CodeSandbox-blue?logo=codesandbox)](https://codesandbox.io/p/github/opengeos/geolibre)
 [![Open in StackBlitz](https://img.shields.io/badge/Open%20in-StackBlitz-blue?logo=stackblitz)](https://stackblitz.com/github/opengeos/geolibre)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-GeoLibre-0078D4?logo=windows)](https://apps.microsoft.com/detail/9nwt67rv531x)
+[![AUR version](https://img.shields.io/aur/version/geolibre-bin?logo=archlinux&label=AUR)](https://aur.archlinux.org/packages/geolibre-bin)
+[![FlatPark](https://img.shields.io/badge/FlatPark-GeoLibre-4A90D9?logo=flatpak)](https://flatpark.org/apps/app.geolibre.GeoLibre/)
 [![image](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20785400.svg)](https://doi.org/10.5281/zenodo.20785400)
 
@@ -89,8 +92,11 @@ GeoLibre is built with **Tauri v2**, **React**, **TypeScript**, **MapLibre GL JS
 ## Install
 
 Prebuilt desktop installers for Linux, Windows, and macOS are published on the
-[Releases](https://github.com/opengeos/GeoLibre/releases) page. On macOS you can
-install and update with Homebrew:
+[Releases](https://github.com/opengeos/GeoLibre/releases) page. On Windows you
+can install the signed, auto-updating build from the
+[Microsoft Store](https://apps.microsoft.com/detail/9nwt67rv531x), or the
+unsigned GitHub Release build via `winget install OpenGeos.GeoLibre`. On macOS
+you can install and update with Homebrew:
 
 ```bash
 brew tap opengeos/geolibre
