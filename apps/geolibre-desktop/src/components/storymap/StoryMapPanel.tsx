@@ -1,4 +1,11 @@
-import { type RefObject, useCallback, useMemo, useRef, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -43,6 +50,7 @@ import {
   ChevronUp,
   Crosshair,
   Download,
+  Frame,
   MapPin,
   Play,
   Plus,
@@ -77,6 +85,7 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
   const open = useAppStore((s) => s.ui.storymapPanelOpen);
   const setOpen = useAppStore((s) => s.setStorymapPanelOpen);
   const setPresenting = useAppStore((s) => s.setStorymapPresenting);
+  const setComposing = useAppStore((s) => s.setStorymapComposing);
   const storymap = useAppStore((s) => s.storymap);
   const layers = useAppStore((s) => s.layers);
   const basemapStyleUrl = useAppStore((s) => s.basemapStyleUrl);
@@ -92,6 +101,80 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
   const [exportError, setExportError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importFormatRef = useRef<"json" | "csv">("json");
+
+  // Explicit dialog size once the user drags the bottom-right grip (null = the
+  // default responsive size). The dialog element is read for its live size.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const [dialogSize, setDialogSize] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  // Tears down an in-progress resize drag (removes the window listeners and
+  // cancels the pending RAF) so it can't leak if the dialog unmounts mid-drag.
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+
+  // Resize the whole dialog from its bottom-right grip. The dialog is centred
+  // via a -50% transform, so the right/bottom edges move by half the size
+  // change; growing by 2x the pointer delta keeps the grip under the cursor.
+  const startDialogResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      const el = dialogRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startW = rect.width;
+      const startH = rect.height;
+      let next = { width: startW, height: startH };
+      let frame: number | null = null;
+      const prevCursor = document.body.style.cursor;
+      const prevSelect = document.body.style.userSelect;
+      document.body.style.cursor = "nwse-resize";
+      document.body.style.userSelect = "none";
+
+      const onMove = (e: PointerEvent) => {
+        next = {
+          width: Math.max(
+            360,
+            Math.min(window.innerWidth - 16, startW + (e.clientX - startX) * 2),
+          ),
+          height: Math.max(
+            320,
+            Math.min(window.innerHeight - 16, startH + (e.clientY - startY) * 2),
+          ),
+        };
+        if (frame !== null) return;
+        frame = window.requestAnimationFrame(() => {
+          frame = null;
+          setDialogSize(next);
+        });
+      };
+      const cleanup = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        if (frame !== null) window.cancelAnimationFrame(frame);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevSelect;
+        resizeCleanupRef.current = null;
+      };
+      const onUp = () => {
+        cleanup();
+        setDialogSize(next);
+      };
+      resizeCleanupRef.current = cleanup;
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    },
+    [],
+  );
+
+  // Tear down an in-progress resize drag if the dialog unmounts mid-drag.
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
 
   const story: StoryMap = storymap ?? DEFAULT_STORY_MAP;
   const chapters = story.chapters;
@@ -166,6 +249,19 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
       mapControllerRef.current?.flyToView(chapter.location);
     },
     [mapControllerRef],
+  );
+
+  const handleCompose = useCallback(
+    (chapter: StoryChapter) => {
+      // Reveal the live map by closing the dialog (its full-screen overlay
+      // otherwise hides the map), fly to the chapter's saved view so composing
+      // starts from where the slide currently sits, then enter compose mode.
+      // The floating compose bar takes over from here to save or cancel.
+      mapControllerRef.current?.flyToView(chapter.location);
+      setComposing(chapter.id);
+      setOpen(false);
+    },
+    [mapControllerRef, setComposing, setOpen],
   );
 
   const handlePresent = useCallback(() => {
@@ -275,7 +371,39 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="flex max-h-[88vh] w-[min(92vw,46rem)] flex-col gap-0 p-0">
+      <DialogContent
+        ref={dialogRef}
+        className="flex max-h-[88vh] w-[min(92vw,46rem)] flex-col gap-0 p-0"
+        style={
+          dialogSize
+            ? {
+                width: dialogSize.width,
+                height: dialogSize.height,
+                maxWidth: "none",
+                maxHeight: "none",
+              }
+            : undefined
+        }
+        bodyClassName="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden p-0"
+        resizeHandle={
+          <div
+            role="separator"
+            aria-label={t("storymap.resizeDialog")}
+            title={t("storymap.resizeDialog")}
+            onPointerDown={startDialogResize}
+            className="absolute bottom-0 right-0 z-10 hidden h-5 w-5 cursor-nwse-resize touch-none select-none text-muted-foreground hover:text-foreground md:block"
+          >
+            <svg viewBox="0 0 16 16" className="h-full w-full" aria-hidden="true">
+              <path
+                d="M11 15L15 11M6 15L15 6"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+        }
+      >
         <DialogHeader className="border-b px-5 py-4">
           <DialogTitle className="flex items-center gap-2">
             <MapPin className="h-4 w-4" />
@@ -292,7 +420,15 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
           onChange={(e) => void handleImportFile(e)}
         />
 
-        <ScrollArea className="flex-1 overflow-y-auto px-5 py-4">
+        {/* Force the Radix viewport's inner wrapper to `display:block`
+            (it defaults to `display:table; min-width:100%`, which sizes to the
+            content's intrinsic width and spawns a spurious horizontal scrollbar
+            that, with the vertical one, covered the chapter action buttons —
+            #775). `!block` overrides the inline style. */}
+        <ScrollArea className="min-h-0 flex-1 [&_[data-radix-scroll-area-viewport]>div]:!block">
+          {/* Pad the content (not the ScrollArea root) so the overlay
+              scrollbar sits in the right gutter instead of over the content. */}
+          <div className="px-5 py-4">
           <StorySettings story={story} onChange={updateSettings} t={t} />
 
           <Separator className="my-4" />
@@ -385,10 +521,12 @@ export function StoryMapPanel({ mapControllerRef }: StoryMapPanelProps) {
                   }
                   onCaptureView={() => handleCaptureView(chapter.id)}
                   onPreview={() => handlePreview(chapter)}
+                  onCompose={() => handleCompose(chapter)}
                 />
               ))}
             </div>
           )}
+          </div>
         </ScrollArea>
 
         <div className="flex items-center justify-between gap-2 border-t px-5 py-3">
@@ -536,6 +674,7 @@ interface ChapterCardProps {
   onMove: (direction: "up" | "down") => void;
   onCaptureView: () => void;
   onPreview: () => void;
+  onCompose: () => void;
 }
 
 function ChapterCard({
@@ -551,6 +690,7 @@ function ChapterCard({
   onMove,
   onCaptureView,
   onPreview,
+  onCompose,
 }: ChapterCardProps) {
   const { center, zoom, pitch, bearing } = chapter.location;
   return (
@@ -568,6 +708,15 @@ function ChapterCard({
             {chapter.title || t("storymap.untitledChapter")}
           </span>
         </button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          title={t("storymap.composeOnMap")}
+          onClick={onCompose}
+        >
+          <Frame className="h-4 w-4" />
+        </Button>
         <Button
           variant="ghost"
           size="icon"
@@ -692,15 +841,26 @@ function ChapterCard({
                 {center[0].toFixed(4)}, {center[1].toFixed(4)} · z
                 {zoom.toFixed(1)} · p{pitch.toFixed(0)} · b{bearing.toFixed(0)}
               </span>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7"
-                onClick={onCaptureView}
-              >
-                <Crosshair className="mr-1 h-3.5 w-3.5" />
-                {t("storymap.captureView")}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  onClick={onCaptureView}
+                >
+                  <Crosshair className="mr-1 h-3.5 w-3.5" />
+                  {t("storymap.captureView")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  onClick={onCompose}
+                >
+                  <Frame className="mr-1 h-3.5 w-3.5" />
+                  {t("storymap.composeOnMap")}
+                </Button>
+              </div>
             </div>
           </div>
 
