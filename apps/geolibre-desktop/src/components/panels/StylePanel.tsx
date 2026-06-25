@@ -27,6 +27,9 @@ import {
   Select,
   Separator,
   Slider,
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
 } from "@geolibre/ui";
 import { RASTER_SOURCE_KIND, SKETCHES_SOURCE_KIND } from "@geolibre/plugins";
 import type { MapController } from "@geolibre/map";
@@ -36,6 +39,7 @@ import { RasterSymbologySection } from "./RasterSymbologySection";
 import {
   ChevronDown,
   ChevronUp,
+  Info,
   PanelRightClose,
   PanelRightOpen,
   Plus,
@@ -762,6 +766,7 @@ interface NumericStyleInputProps {
   max: number;
   step: number;
   onChange: (value: number) => void;
+  tooltip?: string;
 }
 
 function NumericStyleInput({
@@ -772,6 +777,7 @@ function NumericStyleInput({
   max,
   step,
   onChange,
+  tooltip,
 }: NumericStyleInputProps) {
   const normalize = (next: number) =>
     Number(clamp(next, min, max).toFixed(stepPrecision(step)));
@@ -782,7 +788,23 @@ function NumericStyleInput({
 
   return (
     <div className="space-y-2">
-      <Label htmlFor={id}>{label}</Label>
+      <div className="flex items-center gap-1.5">
+        <Label htmlFor={id}>{label}</Label>
+        {tooltip ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={tooltip}
+                className="inline-flex cursor-help rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Info className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{tooltip}</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
       <div className="relative">
         <Input
           id={id}
@@ -1651,7 +1673,8 @@ export function StylePanel({
     <div className="grid grid-cols-2 gap-3">
       <NumericStyleInput
         id={`${layer.id}-minZoom`}
-        label="Min zoom"
+        label={t("style.visibility.minZoom")}
+        tooltip={t("style.visibility.minZoomTooltip")}
         min={MIN_LAYER_ZOOM}
         max={maxZoom}
         step={1}
@@ -1660,7 +1683,8 @@ export function StylePanel({
       />
       <NumericStyleInput
         id={`${layer.id}-maxZoom`}
-        label="Max zoom"
+        label={t("style.visibility.maxZoom")}
+        tooltip={t("style.visibility.maxZoomTooltip")}
         min={minZoom}
         max={MAX_LAYER_ZOOM}
         step={1}

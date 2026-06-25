@@ -1967,6 +1967,12 @@
       "resetHint": "Reset adjustments to their default values",
       "exactValueHint": "Double-click to enter an exact value"
     },
+    "visibility": {
+      "minZoom": "Min zoom",
+      "maxZoom": "Max zoom",
+      "minZoomTooltip": "Zoom level at which this layer appears. Higher numbers are more zoomed in.",
+      "maxZoomTooltip": "Zoom level at which this layer disappears. Higher numbers are more zoomed in."
+    },
     "labels": {
       "heading": "Labels",
       "show": "Show labels",
