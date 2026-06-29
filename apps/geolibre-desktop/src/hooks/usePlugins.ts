@@ -149,11 +149,25 @@ manager.registerAll([
 let externalPluginsLoaded = false;
 let externalPluginsLoadPromise: Promise<void> | null = null;
 let externalPluginsLoadKey: string | null = null;
+let externalPluginLoadIssues = new Map<string, string>();
 const externalPluginsListeners = new Set<() => void>();
 const EMPTY_PLUGIN_MANIFEST_URLS: string[] = [];
 
 export function getPluginManager(): PluginManager {
   return manager;
+}
+
+export function getExternalPluginLoadIssues(): ReadonlyMap<string, string> {
+  return externalPluginLoadIssues;
+}
+
+export function subscribeToExternalPluginLoads(
+  listener: () => void,
+): () => void {
+  // Shares the ready-state listener set so marketplace rows update for both
+  // successful loads and per-plugin load issues.
+  externalPluginsListeners.add(listener);
+  return () => externalPluginsListeners.delete(listener);
 }
 
 // Upgrade an installed external plugin in place by re-fetching its manifest URL
@@ -457,6 +471,8 @@ function ensureExternalPluginsLoadedWithSettings(
     return externalPluginsLoadPromise;
   }
 
+  externalPluginLoadIssues = new Map();
+  notifyExternalPluginsListeners();
   setExternalPluginsLoaded(false);
   externalPluginsLoadKey = loadKey;
   // Serialize scans: loadExternalPlugins reads and writes module-level state
@@ -484,6 +500,13 @@ function ensureExternalPluginsLoadedWithSettings(
       );
     })
     .then((result) => {
+      externalPluginLoadIssues = new Map(
+        result.issues.map((issue) => [
+          issue.sourceUrl ?? issue.archiveName,
+          issue.message,
+        ]),
+      );
+      notifyExternalPluginsListeners();
       if (result.loadedPluginIds.length) {
         console.info(
           `Loaded external GeoLibre plugins from ${result.pluginSources.join(
@@ -908,6 +931,10 @@ function isTauriRuntime(): boolean {
 function setExternalPluginsLoaded(loaded: boolean): void {
   if (externalPluginsLoaded === loaded) return;
   externalPluginsLoaded = loaded;
+  notifyExternalPluginsListeners();
+}
+
+function notifyExternalPluginsListeners(): void {
   for (const listener of externalPluginsListeners) listener();
 }
 
