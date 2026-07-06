@@ -24,3 +24,10 @@ export {
 export { ResetBearingControl } from "./reset-bearing-control";
 export { isPlaceholderLayer, placeholderMessage } from "./placeholders";
 export { setExternalDeckLayerOrderHandler } from "./layer-sync";
+export {
+  buildMapboxStyle,
+  mapboxStyleToJson,
+  type ExportableLayer,
+  type MapboxStyleExportOptions,
+  type MapboxStyleExportResult,
+} from "./mapbox-style-export";
