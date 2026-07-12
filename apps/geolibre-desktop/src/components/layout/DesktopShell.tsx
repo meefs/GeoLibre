@@ -87,6 +87,11 @@ import {
 } from "../../hooks/usePlugins";
 import { registerMbtilesProtocol } from "../../lib/mbtiles";
 import { hasReverseGeocodeConsent } from "../../lib/reverse-geocode-consent";
+import {
+  hasKnowledgeCardConsent,
+  recordKnowledgeCardConsent,
+} from "../../lib/knowledge-consent";
+import { wikipediaLang } from "../../lib/knowledge";
 import { registerXyzTileProtocol } from "../../lib/xyz-url";
 import { useEmbedBridge } from "../../hooks/useEmbedBridge";
 import { useRasterIdentify } from "../../hooks/useRasterIdentify";
@@ -105,6 +110,11 @@ import { PixelTimeSeriesControl } from "./PixelTimeSeriesControl";
 import { RasterSubsetPanel } from "./RasterSubsetPanel";
 import { TerrainSettingsDialog } from "./TerrainSettingsDialog";
 import { MapContextMenu } from "./MapContextMenu";
+import {
+  KnowledgeCardPanel,
+  type KnowledgePlace,
+} from "./KnowledgeCardPanel";
+import { KnowledgeCardConsentDialog } from "./KnowledgeCardConsentDialog";
 import { MapGrid } from "./MapGrid";
 import { RemoteCursorsOverlay } from "./RemoteCursorsOverlay";
 import { useCommandBridge } from "../../hooks/useCommandBridge";
@@ -476,6 +486,39 @@ export function DesktopShell({
   const activeResizeCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => activeResizeCleanupRef.current?.(), []);
   const mapControllerRef = useRef<MapController | null>(null);
+  // The place shown in the Wikipedia knowledge card, or null when it is closed.
+  // `pendingKnowledgePlace` holds the target while the one-time consent notice
+  // is open, so it can be applied only after the user acknowledges it.
+  const [knowledgePlace, setKnowledgePlace] = useState<KnowledgePlace | null>(
+    null,
+  );
+  const [pendingKnowledgePlace, setPendingKnowledgePlace] =
+    useState<KnowledgePlace | null>(null);
+  const [knowledgeNoticeOpen, setKnowledgeNoticeOpen] = useState(false);
+  // Open a knowledge card for a clicked point, gating the first lookup behind a
+  // one-time privacy notice since it sends the coordinate to Wikipedia.
+  const handleExplorePlace = useCallback((lat: number, lng: number) => {
+    if (hasKnowledgeCardConsent()) {
+      setKnowledgePlace({ lat, lng });
+    } else {
+      setPendingKnowledgePlace({ lat, lng });
+      setKnowledgeNoticeOpen(true);
+    }
+  }, []);
+  const confirmKnowledgeConsent = useCallback(() => {
+    recordKnowledgeCardConsent();
+    setKnowledgeNoticeOpen(false);
+    setKnowledgePlace(pendingKnowledgePlace);
+    setPendingKnowledgePlace(null);
+  }, [pendingKnowledgePlace]);
+  // Stable identity (mapControllerRef is a ref) so the card's openNearby
+  // useCallback, which depends on this, keeps its memoization across renders.
+  const handleKnowledgeFlyTo = useCallback((lat: number, lon: number) => {
+    mapControllerRef.current?.flyTo({
+      center: [lon, lat],
+      zoom: Math.max(mapControllerRef.current?.getMap()?.getZoom() ?? 12, 14),
+    });
+  }, []);
   // The COG/WMS/XYZ layer whose bounding-box subset is being extracted in the
   // floating Extract Subset panel, or null when that panel is closed.
   const [rasterSubsetLayer, setRasterSubsetLayer] =
@@ -1854,6 +1897,13 @@ export function DesktopShell({
               <MapContextMenu
                 mapControllerRef={mapControllerRef}
                 mapReadyGeneration={mapReadyGeneration}
+                onExplorePlace={handleExplorePlace}
+              />
+              <KnowledgeCardPanel
+                place={knowledgePlace}
+                lang={wikipediaLang(i18n.language)}
+                onClose={() => setKnowledgePlace(null)}
+                onFlyTo={handleKnowledgeFlyTo}
               />
               <BoundsRestrictionIndicator />
               {/* Isolate the collaboration badge in its own boundary: it renders
@@ -1885,6 +1935,17 @@ export function DesktopShell({
           <SectionErrorBoundary label="Route animation panel">
             <RouteAnimationPanel mapControllerRef={mapControllerRef} />
           </SectionErrorBoundary>
+          <KnowledgeCardConsentDialog
+            open={knowledgeNoticeOpen}
+            onOpenChange={(open) => {
+              setKnowledgeNoticeOpen(open);
+              // Clear the paired pending place when the notice is dismissed
+              // (Cancel/Escape/overlay), mirroring dismissRoutingNotice so no
+              // stale target lingers. Confirm sets the place before this runs.
+              if (!open) setPendingKnowledgePlace(null);
+            }}
+            onConfirm={confirmKnowledgeConsent}
+          />
           {/* Rendered here (not in TopToolbar) so the dialog the status badge
               reopens stays mounted even in toolbar-hidden layouts (#754). */}
           {collaboration.enabled && (
