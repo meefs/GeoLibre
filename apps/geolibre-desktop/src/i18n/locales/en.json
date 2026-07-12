@@ -1,4 +1,13 @@
 {
+  "browser": {
+    "title": "Browser",
+    "searchPlaceholder": "Search data sources",
+    "empty": "No saved services or recent projects yet.",
+    "emptyGroup": "Empty",
+    "noMatches": "No matches.",
+    "addFailed": "Could not add this data source.",
+    "builtinBadge": "built-in"
+  },
   "about": {
     "trigger": "About",
     "title": "About GeoLibre",
@@ -1291,6 +1300,7 @@
       "showProjectInfoToolbar": "Show project info in the toolbar",
       "showLayersPanel": "Show Layers panel",
       "showStylePanel": "Show Style panel",
+      "showBrowserPanel": "Show Browser panel",
       "showAttributePanel": "Show Attribute panel",
       "urlParamsNote": "URL layout parameters still apply when present in shared viewer links."
     },
