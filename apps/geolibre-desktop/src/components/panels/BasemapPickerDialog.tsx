@@ -15,6 +15,7 @@ import {
   DialogTitle,
   Input,
   Label,
+  Select,
 } from "@geolibre/ui";
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -26,9 +27,18 @@ import {
   type PresetBasemap,
 } from "../../lib/basemap-presets";
 import {
+  isOfflineBasemapSentinel,
+  PROTOMAPS_FLAVORS,
+  type ProtomapsFlavor,
+} from "@geolibre/map";
+import {
   planetaryBasemapLabel,
   planetaryBasemapSectionKey,
 } from "../../lib/planetary-sections";
+import {
+  buildRemotePmtilesBasemap,
+  isPmtilesStyleUrl,
+} from "../../lib/pmtiles-basemap-url";
 import { CollapsibleSection } from "../CollapsibleSection";
 
 // Picking the "Liberty 3D" preset applies the Liberty style and tilts the
@@ -38,6 +48,33 @@ const THREE_D_PITCH = 60;
 
 const BLANK_CHOICE = "__blank__";
 const CUSTOM_CHOICE = "__custom__";
+const OFFLINE_CHOICE = "__offline__";
+
+// The last custom URL (and PMTiles flavor) the user applied, so the field is
+// repopulated next time the picker opens — a PMTiles basemap resolves to an
+// opaque sentinel that can't be reversed back into its URL, so we remember it.
+const CUSTOM_URL_STORAGE_KEY = "geolibre.basemapPicker.customUrl";
+const CUSTOM_FLAVOR_STORAGE_KEY = "geolibre.basemapPicker.customFlavor";
+
+function readStoredCustomUrl(): string {
+  try {
+    return localStorage.getItem(CUSTOM_URL_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function readStoredCustomFlavor(): ProtomapsFlavor {
+  try {
+    const stored = localStorage.getItem(CUSTOM_FLAVOR_STORAGE_KEY);
+    if (stored && (PROTOMAPS_FLAVORS as readonly string[]).includes(stored)) {
+      return stored as ProtomapsFlavor;
+    }
+  } catch {
+    // Ignore unavailable storage.
+  }
+  return "light";
+}
 
 interface PresetButtonProps {
   name: string;
@@ -121,26 +158,39 @@ export function BasemapPickerDialog({
   // wins and only one button highlights.
   const activeChoice = useMemo(() => {
     if (basemapStyleUrl === BLANK_BASEMAP) return BLANK_CHOICE;
+    // An offline/PMTiles basemap is a runtime sentinel, not a real style URL —
+    // don't treat it as a custom URL (its sentinel would fail URL validation).
+    if (isOfflineBasemapSentinel(basemapStyleUrl)) return OFFLINE_CHOICE;
     const preset = allPresets.find((p) => p.styleUrl === basemapStyleUrl);
     return preset ? preset.id : CUSTOM_CHOICE;
   }, [allPresets, basemapStyleUrl]);
 
-  // Seed the custom URL field with the active style when it is not one of the
-  // known presets (i.e. the project was created from a custom style URL).
+  // Seed the custom URL field when the dialog opens: prefer the active custom
+  // style URL, else fall back to the last custom URL the user applied (a PMTiles
+  // basemap resolves to a sentinel that can't be reversed to its URL).
   const [customUrl, setCustomUrl] = useState("");
+  const [customFlavor, setCustomFlavor] = useState<ProtomapsFlavor>("light");
   useEffect(() => {
     if (!open) return;
-    setCustomUrl(activeChoice === CUSTOM_CHOICE ? basemapStyleUrl : "");
+    setCustomUrl(
+      activeChoice === CUSTOM_CHOICE ? basemapStyleUrl : readStoredCustomUrl(),
+    );
+    setCustomFlavor(readStoredCustomFlavor());
     // Re-seed only when the dialog opens, not on every store change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const customStyleUrl = customUrl.trim();
+  const customIsPmtiles = isPmtilesStyleUrl(customStyleUrl);
   const isCustomUrlValid = useMemo(() => {
     if (!customStyleUrl) return false;
     try {
       const url = new URL(customStyleUrl);
-      return url.protocol === "http:" || url.protocol === "https:";
+      return (
+        url.protocol === "http:" ||
+        url.protocol === "https:" ||
+        url.protocol === "pmtiles:"
+      );
     } catch {
       return false;
     }
@@ -171,7 +221,19 @@ export function BasemapPickerDialog({
   const applyCustom = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!isCustomUrlValid) return;
-    setBasemapStyleUrl(customStyleUrl);
+    try {
+      localStorage.setItem(CUSTOM_URL_STORAGE_KEY, customStyleUrl);
+      if (customIsPmtiles) {
+        localStorage.setItem(CUSTOM_FLAVOR_STORAGE_KEY, customFlavor);
+      }
+    } catch {
+      // Ignore unavailable storage; persistence is best-effort.
+    }
+    setBasemapStyleUrl(
+      customIsPmtiles
+        ? buildRemotePmtilesBasemap(customStyleUrl, customFlavor)
+        : customStyleUrl,
+    );
     onOpenChange(false);
   };
 
@@ -278,9 +340,9 @@ export function BasemapPickerDialog({
             <div className="flex gap-2">
               <Input
                 id="basemap-picker-custom-url"
-                type="url"
+                type="text"
                 inputMode="url"
-                placeholder="https://example.com/style.json"
+                placeholder="https://example.com/style.json or …/basemap.pmtiles"
                 value={customUrl}
                 onChange={(event) => setCustomUrl(event.target.value)}
               />
@@ -288,6 +350,29 @@ export function BasemapPickerDialog({
                 {t("basemapPicker.applyCustom")}
               </Button>
             </div>
+            {customIsPmtiles ? (
+              <div className="space-y-1">
+                <Label
+                  htmlFor="basemap-picker-custom-flavor"
+                  className="text-xs"
+                >
+                  {t("basemapExtract.style")}
+                </Label>
+                <Select
+                  id="basemap-picker-custom-flavor"
+                  value={customFlavor}
+                  onChange={(event) =>
+                    setCustomFlavor(event.target.value as ProtomapsFlavor)
+                  }
+                >
+                  {PROTOMAPS_FLAVORS.map((f) => (
+                    <option key={f} value={f}>
+                      {t(`basemapExtract.flavor.${f}`)}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            ) : null}
             {customStyleUrl && !isCustomUrlValid ? (
               <p className="text-xs text-destructive">
                 {t("basemapPicker.invalidUrl")}

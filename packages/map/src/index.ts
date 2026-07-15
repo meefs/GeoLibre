@@ -44,6 +44,18 @@ export {
 export { ResetBearingControl } from "./reset-bearing-control";
 export { isPlaceholderLayer, placeholderMessage } from "./placeholders";
 export {
+  buildProtomapsBasemapStyle,
+  registerOfflineBasemapStyle,
+  evictOfflineBasemapStyle,
+  isOfflineBasemapSentinel,
+  OFFLINE_BASEMAP_SENTINEL_PREFIX,
+  PROTOMAPS_FLAVORS,
+  type ProtomapsFlavor,
+  type ProtomapsBasemapStyleOptions,
+} from "./protomaps-basemap";
+export {
+  ensureRemotePMTilesArchive,
+  hasPMTilesArchive,
   pmtilesNativeLayerIds,
   readPMTilesArchiveInfo,
   registerPMTilesArchive,

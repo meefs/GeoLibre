@@ -12,6 +12,7 @@
     "@geolibre/core": "*",
     "@maplibre/geojson-vt": "^6.1.1",
     "@maplibre/vt-pbf": "^4.3.2",
+    "@protomaps/basemaps": "^5.7.2",
     "@turf/bbox": "^7.3.5",
     "@turf/helpers": "^7.3.5",
     "cesium": "^1.143.0",

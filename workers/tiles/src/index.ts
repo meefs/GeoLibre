@@ -171,8 +171,93 @@ const MAX_WMS_ZOOM = 8;
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, OPTIONS",
+  // Allow the Range request header (the /pmtiles route needs it) and expose the
+  // response headers a range reader relies on. Harmless for the tile routes.
+  "access-control-allow-headers": "range",
+  "access-control-expose-headers":
+    "content-range, content-length, etag, accept-ranges",
   "access-control-max-age": "86400",
 };
+
+/** `/pmtiles/<name>.pmtiles` range-proxies the Protomaps daily planet builds,
+ * adding CORS so the in-browser PMTiles extractor can byte-range them from any
+ * origin (build.protomaps.com only allowlists a few). Scoped to that one host
+ * and `.pmtiles` paths so this is never an open proxy. */
+const PMTILES_PATH = /^\/pmtiles\/([A-Za-z0-9._-]+\.pmtiles)$/;
+const PMTILES_UPSTREAM = "https://build.protomaps.com";
+
+// A PMTiles reader only fetches small chunks (the 127-byte header, the root/leaf
+// directories, and individual tile blobs), so we cap the proxied range well
+// below any full-file transfer. This keeps the endpoint from being used to pull
+// a 100+ GB planet build through the Worker (its real bandwidth-containment
+// guard — merely requiring a Range header does not bound the span).
+const PMTILES_MAX_RANGE_BYTES = 32 * 1024 * 1024;
+
+/**
+ * The byte span a single `bytes=` range asks for, or null if it is malformed,
+ * multi-range, or open-ended (`bytes=0-`, which would stream the rest of the
+ * file). `bytes=-N` (suffix) counts as N bytes.
+ */
+function pmtilesRangeSpan(range: string): number | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+  if (!match) return null;
+  const [, startStr, endStr] = match;
+  if (startStr === "") {
+    // `bytes=-N`: the last N bytes. `bytes=-` (both empty) is invalid.
+    if (endStr === "") return null;
+    const suffix = Number(endStr);
+    return Number.isSafeInteger(suffix) ? suffix : null;
+  }
+  // `bytes=start-` is open-ended (unbounded) — reject it.
+  if (endStr === "") return null;
+  const start = Number(startStr);
+  const end = Number(endStr);
+  // The regex allows arbitrarily long digit strings; reject offsets past 2^53
+  // so `Number` precision loss can't collapse a huge span down under the cap.
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return null;
+  if (end < start) return null;
+  return end - start + 1;
+}
+
+// `/pmtiles/latest.pmtiles` resolves to the most recent daily build. Protomaps
+// publishes `<YYYYMMDD>.pmtiles` with no "latest" alias and no index, so we
+// probe backward from today until one exists, then cache the resolved date so
+// every range request in one extraction hits the same file (mismatched dates
+// would corrupt the assembled archive). The TTL is short enough to pick up the
+// next day's build but long enough to stay stable through any extraction.
+const LATEST_NAME = "latest.pmtiles";
+const LATEST_TTL_MS = 60 * 60 * 1000;
+const LATEST_MAX_LOOKBACK_DAYS = 7;
+let latestCache: { date: string; at: number } | null = null;
+
+function utcYmd(msSinceEpoch: number): string {
+  return new Date(msSinceEpoch).toISOString().slice(0, 10).replace(/-/g, "");
+}
+
+/** Resolves `latest` to the newest available `<YYYYMMDD>` build, cached. */
+async function resolveLatestBuildDate(): Promise<string> {
+  const now = Date.now();
+  if (latestCache && now - latestCache.at < LATEST_TTL_MS) {
+    return latestCache.date;
+  }
+  for (let i = 0; i <= LATEST_MAX_LOOKBACK_DAYS; i++) {
+    const ymd = utcYmd(now - i * 86_400_000);
+    // A one-byte range is the cheapest existence check. Deliberately NOT
+    // edge-cached: `cacheEverything` would cache this 1-byte 206 under the
+    // URL-only cache key for `<ymd>.pmtiles` — the very URL handlePmtilesRange
+    // fetches next — so a later real range read could be served this 1-byte
+    // body instead of its bytes. The resolved date is memoised in `latestCache`
+    // already, so no edge cache is needed here.
+    const probe = await fetch(`${PMTILES_UPSTREAM}/${ymd}.pmtiles`, {
+      headers: { range: "bytes=0-0" },
+    });
+    if (probe.status === 206) {
+      latestCache = { date: ymd, at: now };
+      return ymd;
+    }
+  }
+  throw new Error("no recent Protomaps build found");
+}
 
 // Cache tiles for a day at the edge and let browsers hold them for an hour. The
 // mosaics are static, so a long TTL is safe and keeps the map responsive.
@@ -228,6 +313,97 @@ function isAllowedOamOrigin(origin: string | null): boolean {
 
 interface Env {}
 
+/**
+ * Range-proxies one Protomaps planet build. Forwards the client's `Range`
+ * header to build.protomaps.com and re-emits the (usually 206) response with
+ * CORS + range headers so an in-browser PMTiles reader can extract from it.
+ * Only small, bounded byte-range GETs are proxied — a full-file GET (no Range)
+ * or an open-ended/oversized range is refused so this can't be used to pull the
+ * whole 100+ GB archive through the Worker.
+ *
+ * Unlike `/oam/meta`, this route is deliberately *not* origin-gated: the
+ * Jupyter/embed builds run on arbitrary origins and legitimately need to extract
+ * offline basemaps, so an `isAllowedOamOrigin`-style check would break them. The
+ * abuse surface is instead bounded by (a) the per-request range cap above — a
+ * single request can't transfer more than a directory/tile-sized chunk — and
+ * (b) Cloudflare's platform abuse detection plus any zone rate-limiting rule in
+ * front of tiles.geolibre.app (the same defence the OAM route relies on for
+ * per-client throttling). The upstream is public and unauthenticated, so this is
+ * a Worker-egress cost concern, not an access-control bypass.
+ */
+async function handlePmtilesRange(
+  request: Request,
+  name: string,
+): Promise<Response> {
+  const range = request.headers.get("range");
+  if (!range) {
+    return new Response(
+      "This endpoint only serves HTTP range requests (send a Range header).",
+      { status: 400, headers: CORS_HEADERS },
+    );
+  }
+  const span = pmtilesRangeSpan(range);
+  if (span === null || span > PMTILES_MAX_RANGE_BYTES) {
+    return new Response(
+      "This endpoint only serves bounded byte-range reads; the requested range is open-ended or too large.",
+      { status: 416, headers: CORS_HEADERS },
+    );
+  }
+  let target = name;
+  if (name === LATEST_NAME) {
+    try {
+      target = `${await resolveLatestBuildDate()}.pmtiles`;
+    } catch {
+      return new Response("No recent Protomaps build available", {
+        status: 502,
+        headers: CORS_HEADERS,
+      });
+    }
+  }
+  let originResponse: Response;
+  try {
+    // Deliberately no `cf.cacheEverything`: caching partial (206) responses is
+    // unsafe here because Cloudflare's default cache key is URL-only and does
+    // not vary by the `Range` header, so a cached 206 for one range could be
+    // served for a different range of the same file — corrupting the bytes a
+    // PMTiles reader assembles. `cf.cacheKey` would fix the key but only takes
+    // effect on Enterprise plans (silently ignored otherwise), so we don't rely
+    // on it. Without cacheEverything, Cloudflare doesn't edge-cache the 206 at
+    // all; the upstream still serves range requests directly.
+    originResponse = await fetch(`${PMTILES_UPSTREAM}/${target}`, {
+      headers: { range },
+    });
+  } catch {
+    return new Response("Bad Gateway", { status: 502, headers: CORS_HEADERS });
+  }
+  // If the origin ignored the `Range` and returned the whole object (200), refuse
+  // to stream it — that would defeat the range-only bandwidth guard and could
+  // pull a 100+ GB build through the Worker.
+  if (originResponse.status === 200) {
+    return new Response("Upstream did not honor the range request.", {
+      status: 502,
+      headers: CORS_HEADERS,
+    });
+  }
+  const headers = new Headers(CORS_HEADERS);
+  for (const key of [
+    "content-type",
+    "content-length",
+    "content-range",
+    "accept-ranges",
+    "etag",
+    "last-modified",
+    "cache-control",
+  ]) {
+    const value = originResponse.headers.get(key);
+    if (value) headers.set(key, value);
+  }
+  return new Response(originResponse.body, {
+    status: originResponse.status,
+    headers,
+  });
+}
+
 export default {
   async fetch(
     request: Request,
@@ -255,7 +431,8 @@ export default {
           `    Datasets: ${Object.keys(DATASETS).join(", ")}\n` +
           "  Reprojected WMS: /wms/<dataset>/<z>/<x>/<y>.png\n" +
           `    Datasets: ${Object.keys(WMS_DATASETS).join(", ")}\n` +
-          "  OpenAerialMap search: /oam/meta?bbox=...&limit=...\n",
+          "  OpenAerialMap search: /oam/meta?bbox=...&limit=...\n" +
+          "  PMTiles range proxy: /pmtiles/<name>.pmtiles (Range header required)\n",
         { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } },
       );
     }
@@ -320,6 +497,11 @@ export default {
         status: originResponse.status,
         headers,
       });
+    }
+
+    const pmtilesMatch = PMTILES_PATH.exec(url.pathname);
+    if (pmtilesMatch) {
+      return handlePmtilesRange(request, pmtilesMatch[1]);
     }
 
     const match = TILE_PATH.exec(url.pathname);

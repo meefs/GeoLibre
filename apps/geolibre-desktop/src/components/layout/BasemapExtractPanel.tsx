@@ -1,26 +1,41 @@
 import {
+  DEFAULT_BASEMAP,
   DEFAULT_LAYER_STYLE,
   type GeoLibreLayer,
   useAppStore,
 } from "@geolibre/core";
 import {
+  buildProtomapsBasemapStyle,
+  evictOfflineBasemapStyle,
+  hasPMTilesArchive,
   type MapController,
+  OFFLINE_BASEMAP_SENTINEL_PREFIX,
   pmtilesNativeLayerIds,
+  PROTOMAPS_FLAVORS,
+  type ProtomapsFlavor,
   readPMTilesArchiveInfo,
+  registerOfflineBasemapStyle,
   registerPMTilesArchive,
+  unregisterPMTilesArchive,
 } from "@geolibre/map";
 import {
   extractPmtiles,
   type PmtilesExtractProgress,
 } from "@geolibre/processing";
-import { Button, Input, Label } from "@geolibre/ui";
+import { Button, Input, Label, Select } from "@geolibre/ui";
 import {
+  Check,
   CheckCircle2,
   Download,
+  Eraser,
+  FolderOpen,
   GripVertical,
+  Layers,
   Loader2,
   Map as MapIcon,
+  Pencil,
   Scan,
+  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -34,16 +49,46 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { clamp } from "../../lib/clamp";
+import {
+  deleteOfflineBasemap,
+  loadOfflineBasemaps,
+  type OfflineBasemap,
+  renameOfflineBasemap,
+  setOfflineBasemapFlavor,
+  subscribeOfflineBasemaps,
+  upsertOfflineBasemap,
+} from "../../lib/offline-basemaps";
 import { formatBytes } from "../../lib/offline-regions";
-import { saveBinaryFileWithFallback } from "../../lib/tauri-io";
+import { layerNameFromPath } from "./add-data/helpers";
+import {
+  isTauri,
+  openLocalDataFileWithFallback,
+  readLocalFileBytes,
+  saveBinaryFileWithFallback,
+} from "../../lib/tauri-io";
 import { sanitizeExportFileName } from "../../lib/vector-export";
 
 /** Default panel geometry (px); the user can drag it around the map area. */
 const PANEL_DEFAULT_W = 320;
 const PANEL_MARGIN = 12;
+/** Smallest the panel can be resized to, so the form stays usable. */
+const PANEL_MIN_W = 260;
+const PANEL_MIN_H = 240;
 
 /** Remembered across sessions so repeat extracts don't retype the archive URL. */
 const URL_STORAGE_KEY = "geolibre.basemapExtract.url";
+
+/** GeoLibre's Cloudflare Worker (workers/tiles) range-proxies the Protomaps
+ * daily planet builds with CORS. */
+const PLANET_PROXY_PREFIX = "https://tiles.geolibre.app/pmtiles/";
+
+/**
+ * Default archive URL: the latest Protomaps planet build through the proxy. The
+ * Worker resolves `latest` to the newest daily build, so this URL is always
+ * current (no client-side date to go stale) and works from any origin —
+ * build.protomaps.com itself only allowlists a few and has no `latest` alias.
+ */
+const DEFAULT_ARCHIVE_URL = `${PLANET_PROXY_PREFIX}latest.pmtiles`;
 
 /** Above this planned size the user must explicitly confirm the download. */
 const CONFIRM_BYTES = 150 * 1024 * 1024;
@@ -136,6 +181,82 @@ function coordsFromBbox(bbox: [number, number, number, number]): CoordFields {
   };
 }
 
+/** Source layers a Protomaps basemap style targets; if an archive exposes some
+ * of these it can render with the Protomaps flavors (styled as a basemap)
+ * rather than a flat overlay. */
+const PROTOMAPS_SCHEMA_LAYERS = ["earth", "water", "roads", "places", "landcover"];
+
+/** `earth`/`water` are distinctively Protomaps-schema; `roads`/`places` are
+ * generic names other vector schemas also use. Requiring one of the former
+ * (plus two schema layers overall) keeps a non-Protomaps archive that merely
+ * has a `roads`/`places` layer from being styled with Protomaps-specific
+ * expressions and rendering blank. */
+function isProtomapsCompatible(sourceLayers: string[]): boolean {
+  const set = new Set(sourceLayers);
+  if (!set.has("earth") && !set.has("water")) return false;
+  return PROTOMAPS_SCHEMA_LAYERS.filter((l) => set.has(l)).length >= 2;
+}
+
+/** Bundled Protomaps glyphs/sprites live under the app's public dir. Resolve
+ * them against the deployment base (BASE_URL — "/", "/geolibre/", or a relative
+ * "./" for the embed/demo build) AND to a fully-qualified absolute URL:
+ * MapLibre rejects non-absolute sprite/glyph URLs ("must be absolute"), so a
+ * bare "./basemaps-assets" from a relative base would break labels and icons,
+ * while a bare "/basemaps-assets" would 404 under a sub-path. `document.baseURI`
+ * turns the base-relative path into an absolute one that honours both. */
+const BASEMAP_ASSETS_BASE = new URL(
+  `${import.meta.env.BASE_URL}basemaps-assets`,
+  document.baseURI,
+).href;
+
+// Tracks the in-memory archive (and style-registry id) backing the currently
+// applied styled offline basemap. A styled basemap is not a GeoLibreLayer, so
+// removeLayerFromMap never frees its archive; we free the previous one here
+// when a different basemap is applied, deleted, or the panel supersedes it.
+//
+// Kept on globalThis (like the style registry and archive-key set this feature
+// adds) so it survives a Vite HMR reload of this module — a plain module `let`
+// would reset to null on reload and then fail to free the archive the live
+// PMTiles protocol still holds.
+type ActiveStyledBasemap = { archiveKey: string; id: string } | null;
+const ACTIVE_STYLED_BASEMAP_KEY = "__geolibreActiveStyledBasemap";
+
+function activeStyledBasemap(): ActiveStyledBasemap {
+  const scope = globalThis as typeof globalThis & {
+    [ACTIVE_STYLED_BASEMAP_KEY]?: ActiveStyledBasemap;
+  };
+  return scope[ACTIVE_STYLED_BASEMAP_KEY] ?? null;
+}
+
+function setActiveStyledBasemap(value: ActiveStyledBasemap): void {
+  (
+    globalThis as typeof globalThis & {
+      [ACTIVE_STYLED_BASEMAP_KEY]?: ActiveStyledBasemap;
+    }
+  )[ACTIVE_STYLED_BASEMAP_KEY] = value;
+}
+
+/** Records the archive/id now backing the styled basemap, freeing the one it
+ * replaces (a different id) so archives don't accumulate for the session. */
+function trackStyledBasemap(id: string, archiveKey: string): void {
+  const active = activeStyledBasemap();
+  if (active && active.id !== id) {
+    unregisterPMTilesArchive(active.archiveKey);
+    evictOfflineBasemapStyle(active.id);
+  }
+  setActiveStyledBasemap({ id, archiveKey });
+}
+
+/** Frees a styled basemap's archive/style if it is the active one (e.g. on
+ * delete), so nothing keeps its bytes resident after it's gone. */
+function forgetStyledBasemap(id: string): void {
+  const active = activeStyledBasemap();
+  if (active?.id !== id) return;
+  unregisterPMTilesArchive(active.archiveKey);
+  evictOfflineBasemapStyle(id);
+  setActiveStyledBasemap(null);
+}
+
 /** A layer/file base name from the archive URL, e.g. "planet" for
  * `https://host/planet.pmtiles`. */
 function baseNameFromUrl(url: string): string {
@@ -164,12 +285,29 @@ export function BasemapExtractPanel({
 }: BasemapExtractPanelProps) {
   const { t } = useTranslation();
   const addLayer = useAppStore((state) => state.addLayer);
+  const setBasemapStyleUrl = useAppStore((state) => state.setBasemapStyleUrl);
+  // The live basemap URL from the store — the source of truth for "is this saved
+  // entry the one currently on the map". The module-level tracker only sees
+  // applies made from this panel, so it goes stale once the user switches the
+  // basemap via the picker/New Project dialogs; comparing the store's sentinel
+  // avoids acting on a basemap this entry no longer controls.
+  const basemapStyleUrl = useAppStore((state) => state.basemapStyleUrl);
+  const isLiveOfflineBasemap = useCallback(
+    (id: string) =>
+      basemapStyleUrl?.startsWith(
+        `${OFFLINE_BASEMAP_SENTINEL_PREFIX}${id}/`,
+      ) ?? false,
+    [basemapStyleUrl],
+  );
 
   const [coords, setCoords] = useState<CoordFields>(EMPTY_COORDS);
   const [drawing, setDrawing] = useState(false);
   const [url, setUrl] = useState("");
   const [minZoom, setMinZoom] = useState("0");
   const [maxZoom, setMaxZoom] = useState("15");
+  // When set, apply the extract as a styled Protomaps basemap in this flavor
+  // instead of adding it as a flat overlay layer.
+  const [flavor, setFlavor] = useState<ProtomapsFlavor | "">("light");
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<PmtilesExtractProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -180,6 +318,20 @@ export function BasemapExtractPanel({
     progress: PmtilesExtractProgress;
     resolve: (go: boolean) => void;
   } | null>(null);
+
+  // The device-local catalogue of extracted basemaps, kept in sync so a new
+  // extract (or a rename/delete elsewhere) refreshes the "Saved basemaps" list.
+  const [savedBasemaps, setSavedBasemaps] = useState<OfflineBasemap[]>(() =>
+    loadOfflineBasemaps(),
+  );
+  useEffect(
+    () => subscribeOfflineBasemaps(() => setSavedBasemaps(loadOfflineBasemaps())),
+    [],
+  );
+  const [applyingId, setApplyingId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const bbox = useMemo(() => parseBbox(coords), [coords]);
   const bboxInvalid =
@@ -196,6 +348,20 @@ export function BasemapExtractPanel({
 
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<PanelPos | null>(null);
+  // Explicit size, null until first resized (the responsive default applies).
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  const resizeStart = useRef<{
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    // Parent-relative top-start corner (the panel is absolute within MapGrid),
+    // matching the drag coordinate system so pinning doesn't jump.
+    left: number;
+    top: number;
+    parentW: number;
+    parentH: number;
+  } | null>(null);
   const [screenPoints, setScreenPoints] = useState<ScreenPoint[] | null>(null);
 
   // Cancels an in-flight extraction when the panel closes or a new run starts.
@@ -223,22 +389,32 @@ export function BasemapExtractPanel({
     setProgress(null);
     setError(null);
     setSuccess(null);
+    setRenamingId(null);
+    setConfirmDeleteId(null);
     setPendingPlan((pending) => {
       pending?.resolve(false);
       return null;
     });
     setPos(null);
-    if (!open) {
-      setCoords(EMPTY_COORDS);
-      return;
-    }
+    setSize(null);
+    // Start with no bounding box: the user draws one or clicks "Use view". Auto-
+    // seeding the whole view would, at a globe/world zoom, produce a near-global
+    // box whose projected overlay degenerates into a stray line across the map.
+    setCoords(EMPTY_COORDS);
+    if (!open) return;
+    // Seed with the latest Protomaps planet build (via the proxy), or a
+    // remembered *custom* URL. A remembered proxy URL — including an old dated
+    // one saved before the `latest` default — defers to `latest` so the default
+    // never pins a stale date; only a different host is restored.
+    let seededUrl = DEFAULT_ARCHIVE_URL;
     try {
-      setUrl(localStorage.getItem(URL_STORAGE_KEY) ?? "");
+      const stored = localStorage.getItem(URL_STORAGE_KEY);
+      if (stored && !stored.startsWith(PLANET_PROXY_PREFIX)) seededUrl = stored;
     } catch {
-      // Storage may be unavailable (private mode); keep the empty default.
+      // Storage may be unavailable (private mode); keep the default.
     }
-    seedFromView();
-  }, [open, seedFromView]);
+    setUrl(seededUrl);
+  }, [open]);
 
   // Latest box, read inside the projection callback so the map listeners don't
   // need `bbox` as a dependency (which changes on every drag mousemove).
@@ -262,6 +438,14 @@ export function BasemapExtractPanel({
         return;
       }
       const [w, s, e, n] = b;
+      // A near-global box (e.g. "Use view" at a world/globe zoom) has corners
+      // that project to the same pole or wrap around, so the four-corner polygon
+      // degenerates into a stray diagonal line. Skip the overlay for such boxes;
+      // the extraction still works, there's just no meaningful rectangle to draw.
+      if (e - w > 170 || n - s > 170) {
+        setScreenPoints(null);
+        return;
+      }
       const corners: [number, number][] = [
         [w, n],
         [e, n],
@@ -416,6 +600,77 @@ export function BasemapExtractPanel({
     [pos],
   );
 
+  // Resize from the bottom-end grip. Pins the top-start corner so the panel
+  // grows toward the grip, clamped to a usable minimum and the room to the
+  // viewport edge. Mirrors the Processing dialog's resize.
+  const handleResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.stopPropagation();
+      const el = panelRef.current;
+      if (!el) return;
+      const parent =
+        (el.offsetParent as HTMLElement | null) ?? el.parentElement ?? null;
+      const pb = parent?.getBoundingClientRect();
+      const eb = el.getBoundingClientRect();
+      const left = eb.left - (pb?.left ?? 0);
+      const top = eb.top - (pb?.top ?? 0);
+      // Pin the top-start corner (parent-relative) so the panel grows toward the
+      // grip without jumping.
+      setPos({ x: left, y: top });
+      resizeStart.current = {
+        x: event.clientX,
+        y: event.clientY,
+        w: eb.width,
+        h: eb.height,
+        left,
+        top,
+        parentW: pb?.width ?? window.innerWidth,
+        parentH: pb?.height ?? window.innerHeight,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [],
+  );
+
+  const handleResizeMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const start = resizeStart.current;
+      if (!start) return;
+      // In an RTL layout the grip renders on the physical left, so the drag
+      // delta is inverted and the room to the edge is measured to the left. Pin
+      // the physical right edge by shifting `pos.x` as the width changes.
+      const isRtl = document.documentElement.dir === "rtl";
+      const availW = isRtl
+        ? start.left + start.w - PANEL_MARGIN
+        : start.parentW - start.left - PANEL_MARGIN;
+      const availH = start.parentH - start.top - PANEL_MARGIN;
+      const deltaX = event.clientX - start.x;
+      const newW = clamp(
+        start.w + (isRtl ? -deltaX : deltaX),
+        Math.min(PANEL_MIN_W, availW),
+        Math.max(PANEL_MIN_W, availW),
+      );
+      if (isRtl) setPos({ x: start.left + start.w - newW, y: start.top });
+      setSize({
+        w: newW,
+        h: clamp(
+          start.h + (event.clientY - start.y),
+          Math.min(PANEL_MIN_H, availH),
+          Math.max(PANEL_MIN_H, availH),
+        ),
+      });
+    },
+    [],
+  );
+
+  const handleResizeEnd = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      resizeStart.current = null;
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    },
+    [],
+  );
+
   const minZoomValue = Number(minZoom);
   const maxZoomValue = Number(maxZoom);
   const zoomInvalid =
@@ -475,54 +730,75 @@ export function BasemapExtractPanel({
         return;
       }
 
-      // Render the extract from memory first so a disk-write failure below can't
-      // discard a successful in-memory extraction.
+      // Register the archive in the shared pmtiles protocol (used by both the
+      // styled-basemap style and the flat-overlay layer). Done before saving so
+      // a disk-write failure below can't discard a successful extraction.
       const layerId = `basemap-extract-${Date.now().toString(36)}`;
       const layerUrl = registerPMTilesArchive(`${layerId}.pmtiles`, archive);
-      const fillColor = DEFAULT_LAYER_STYLE.fillColor;
-      const layer: GeoLibreLayer = {
-        id: layerId,
-        name: fileName,
-        type: "pmtiles",
-        source: {
-          sourceId: layerId,
-          sourceLayers: info.sourceLayers,
-          tileType: info.tileType,
-          type: info.tileType === "raster" ? "raster" : "vector",
-          url: layerUrl,
-        },
-        visible: true,
-        // Raster basemaps render dimmed (raster-opacity reads the layer-level
-        // `opacity`, not style.fillOpacity); vector renders fully opaque.
-        opacity: info.tileType === "raster" ? 0.6 : 1,
-        style: {
-          ...DEFAULT_LAYER_STYLE,
-          fillColor,
-          strokeColor: fillColor,
-        },
-        metadata: {
-          externalNativeLayer: true,
-          nativeLayerIds: pmtilesNativeLayerIds(
-            layerId,
-            info.tileType,
-            info.sourceLayers,
-          ),
-          pickable: true,
-          sourceId: layerId,
-          sourceKind: "pmtiles-url",
-          sourceLayers: info.sourceLayers,
-          tileType: info.tileType,
-        },
-        sourcePath: layerUrl,
-      };
-      addLayer(layer);
+
+      // A Protomaps-schema vector archive can render as a proper styled basemap
+      // (roads/water/labels) in the chosen flavor; anything else is added as a
+      // flat single-symbology overlay layer.
+      const asStyledBasemap =
+        flavor !== "" &&
+        info.tileType === "vector" &&
+        isProtomapsCompatible(info.sourceLayers);
+
+      if (asStyledBasemap) {
+        const style = buildProtomapsBasemapStyle({
+          sourceUrl: layerUrl,
+          flavor,
+          assetsBaseUrl: BASEMAP_ASSETS_BASE,
+        });
+        setBasemapStyleUrl(registerOfflineBasemapStyle(layerId, style));
+        trackStyledBasemap(layerId, `${layerId}.pmtiles`);
+      } else {
+        const fillColor = DEFAULT_LAYER_STYLE.fillColor;
+        const layer: GeoLibreLayer = {
+          id: layerId,
+          name: fileName,
+          type: "pmtiles",
+          source: {
+            sourceId: layerId,
+            sourceLayers: info.sourceLayers,
+            tileType: info.tileType,
+            type: info.tileType === "raster" ? "raster" : "vector",
+            url: layerUrl,
+          },
+          visible: true,
+          // Raster basemaps render dimmed (raster-opacity reads the layer-level
+          // `opacity`, not style.fillOpacity); vector renders fully opaque.
+          opacity: info.tileType === "raster" ? 0.6 : 1,
+          style: {
+            ...DEFAULT_LAYER_STYLE,
+            fillColor,
+            strokeColor: fillColor,
+          },
+          metadata: {
+            externalNativeLayer: true,
+            nativeLayerIds: pmtilesNativeLayerIds(
+              layerId,
+              info.tileType,
+              info.sourceLayers,
+            ),
+            pickable: true,
+            sourceId: layerId,
+            sourceKind: "pmtiles-url",
+            sourceLayers: info.sourceLayers,
+            tileType: info.tileType,
+          },
+          sourcePath: layerUrl,
+        };
+        addLayer(layer);
+      }
       setPhase("done");
 
       // Persisting to disk is best-effort and independent of the layer that is
       // now on the map: a cancel returns null, a write error is reported but
       // does not undo the extraction.
+      let savedPath: string | null = null;
       try {
-        const savedPath = await saveBinaryFileWithFallback(archive, {
+        savedPath = await saveBinaryFileWithFallback(archive, {
           defaultName: `${fileName}.pmtiles`,
           filters: [{ name: "PMTiles", extensions: ["pmtiles"] }],
           browserTypes: [
@@ -533,18 +809,51 @@ export function BasemapExtractPanel({
           ],
           mimeType: "application/octet-stream",
         });
-        setSuccess(
-          savedPath !== null
-            ? t("basemapExtract.successSaved", { path: savedPath })
-            : t("basemapExtract.successAdded"),
-        );
+        if (savedPath !== null) {
+          setSuccess(
+            t(
+              asStyledBasemap
+                ? "basemapExtract.successBasemapSaved"
+                : "basemapExtract.successSaved",
+              { path: savedPath },
+            ),
+          );
+        } else {
+          setSuccess(
+            t(
+              asStyledBasemap
+                ? "basemapExtract.successBasemapApplied"
+                : "basemapExtract.successAdded",
+            ),
+          );
+        }
       } catch (saveErr) {
         setSuccess(
-          t("basemapExtract.successAddedSaveFailed", {
-            error: saveErr instanceof Error ? saveErr.message : String(saveErr),
-          }),
+          t(
+            asStyledBasemap
+              ? "basemapExtract.successBasemapSaveFailed"
+              : "basemapExtract.successAddedSaveFailed",
+            {
+              error: saveErr instanceof Error ? saveErr.message : String(saveErr),
+            },
+          ),
         );
       }
+
+      // Record it in the device-local catalogue so the Saved basemaps list can
+      // rename, delete, and re-apply it.
+      upsertOfflineBasemap({
+        id: layerId,
+        name: fileName,
+        bbox,
+        minZoom: Math.max(minZoomValue, info.minZoom),
+        maxZoom: effectiveMax,
+        flavor: asStyledBasemap ? flavor : null,
+        tileType: info.tileType,
+        bytes: archive.byteLength,
+        savedPath,
+        createdAt: Date.now(),
+      });
     } catch (err) {
       if (controller.signal.aborted) return;
       if (err instanceof DOMException && err.name === "AbortError") {
@@ -561,7 +870,17 @@ export function BasemapExtractPanel({
         setPhase((current) => (current === "running" ? "idle" : current));
       }
     }
-  }, [bbox, zoomInvalid, urlValue, minZoomValue, maxZoomValue, addLayer, t]);
+  }, [
+    bbox,
+    zoomInvalid,
+    urlValue,
+    minZoomValue,
+    maxZoomValue,
+    flavor,
+    addLayer,
+    setBasemapStyleUrl,
+    t,
+  ]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
@@ -573,6 +892,151 @@ export function BasemapExtractPanel({
     setPhase("idle");
     setProgress(null);
   }, []);
+
+  // Re-apply a saved basemap as the styled Protomaps basemap. If its archive is
+  // still registered this session, reuse it. Otherwise reload the bytes: from
+  // the remembered saved path on desktop, or by asking the user to locate the
+  // .pmtiles file (works on web, where there is no stable path).
+  const applySaved = useCallback(
+    async (entry: OfflineBasemap) => {
+      // Only styled vector entries can be re-applied as a basemap. Entries saved
+      // as overlays (user picked "None", or the archive failed the Protomaps
+      // schema check) have `flavor === null` — forcing them through
+      // buildProtomapsBasemapStyle would render a blank/broken basemap.
+      if (entry.tileType !== "vector" || entry.flavor == null) return;
+      setApplyingId(entry.id);
+      setError(null);
+      setSuccess(null);
+      try {
+        const key = `${entry.id}.pmtiles`;
+        if (!hasPMTilesArchive(key)) {
+          let bytes: Uint8Array | null = null;
+          if (entry.savedPath && isTauri()) {
+            bytes = await readLocalFileBytes(entry.savedPath);
+          } else {
+            const picked = await openLocalDataFileWithFallback({
+              filters: [{ name: "PMTiles", extensions: ["pmtiles"] }],
+              accept: ".pmtiles",
+              readBinary: true,
+            });
+            // Cancelled the picker: nothing to apply, no error.
+            if (!picked?.data) return;
+            bytes = new Uint8Array(picked.data);
+          }
+          registerPMTilesArchive(key, bytes);
+        }
+        const style = buildProtomapsBasemapStyle({
+          sourceUrl: `pmtiles://${key}`,
+          flavor: (entry.flavor as ProtomapsFlavor) || "light",
+          assetsBaseUrl: BASEMAP_ASSETS_BASE,
+        });
+        setBasemapStyleUrl(registerOfflineBasemapStyle(entry.id, style));
+        trackStyledBasemap(entry.id, key);
+        setSuccess(t("basemapExtract.successBasemapApplied"));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setApplyingId(null);
+      }
+    },
+    [setBasemapStyleUrl, t],
+  );
+
+  // Change a saved basemap's flavor. Persists it, and re-styles live if the
+  // archive is already loaded (an instant restyle); otherwise it takes effect
+  // the next time "Use as basemap" loads it.
+  const handleSavedFlavorChange = useCallback(
+    (entry: OfflineBasemap, next: ProtomapsFlavor) => {
+      // A flavor only applies to a styled basemap. Overlay-saved entries
+      // (flavor === null) can't be re-styled, so leave them untouched — forcing
+      // a flavor here would push an incompatible archive through applySaved.
+      if (entry.flavor == null) return;
+      setOfflineBasemapFlavor(entry.id, next);
+      // Re-style live only when this entry is the basemap currently on the map;
+      // otherwise just persist the flavor (it applies next "Use as basemap").
+      // Without the live check, tweaking a non-displayed entry's flavor would
+      // silently swap it in as the active basemap.
+      if (isLiveOfflineBasemap(entry.id) && hasPMTilesArchive(`${entry.id}.pmtiles`)) {
+        void applySaved({ ...entry, flavor: next });
+      }
+    },
+    [applySaved, isLiveOfflineBasemap],
+  );
+
+  const startRename = useCallback((entry: OfflineBasemap) => {
+    setRenamingId(entry.id);
+    setRenameValue(entry.name);
+  }, []);
+
+  const commitRename = useCallback(() => {
+    setRenamingId((id) => {
+      if (id) renameOfflineBasemap(id, renameValue);
+      return null;
+    });
+  }, [renameValue]);
+
+  // Open a local .pmtiles file directly as a styled basemap — no download/
+  // extract needed. Applies it in the current flavor and records it under
+  // "Saved basemaps".
+  const [opening, setOpening] = useState(false);
+  const openPmtilesAsBasemap = useCallback(async () => {
+    setOpening(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const picked = await openLocalDataFileWithFallback({
+        filters: [{ name: "PMTiles", extensions: ["pmtiles"] }],
+        accept: ".pmtiles",
+        readBinary: true,
+      });
+      if (!picked?.data) return;
+      const bytes = new Uint8Array(picked.data);
+      const info = await readPMTilesArchiveInfo(bytes);
+      // Only a Protomaps-schema vector archive can be styled as a basemap; a
+      // non-Protomaps archive (or a raster one) would render blank through
+      // buildProtomapsBasemapStyle, so refuse it here the same way handleExtract
+      // falls back to a flat overlay.
+      if (
+        info.tileType !== "vector" ||
+        info.sourceLayers.length === 0 ||
+        !isProtomapsCompatible(info.sourceLayers)
+      ) {
+        setError(t("basemapExtract.errorNotBasemap"));
+        return;
+      }
+      const id = `basemap-open-${Date.now().toString(36)}`;
+      const key = `${id}.pmtiles`;
+      registerPMTilesArchive(key, bytes);
+      const useFlavor: ProtomapsFlavor = flavor !== "" ? flavor : "light";
+      const style = buildProtomapsBasemapStyle({
+        sourceUrl: `pmtiles://${key}`,
+        flavor: useFlavor,
+        assetsBaseUrl: BASEMAP_ASSETS_BASE,
+      });
+      setBasemapStyleUrl(registerOfflineBasemapStyle(id, style));
+      trackStyledBasemap(id, key);
+      upsertOfflineBasemap({
+        id,
+        // `picked.path` is a full absolute path on desktop; take just the file's
+        // base name so the saved entry reads "tuscany", not "home-alice-…".
+        name: layerNameFromPath(picked.path || "", "basemap"),
+        bbox: info.bounds,
+        minZoom: info.minZoom,
+        maxZoom: info.maxZoom,
+        flavor: useFlavor,
+        tileType: "vector",
+        bytes: bytes.length,
+        // A Tauri path is reloadable across sessions; a browser file name is not.
+        savedPath: isTauri() ? picked.path || null : null,
+        createdAt: Date.now(),
+      });
+      setSuccess(t("basemapExtract.successBasemapApplied"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setOpening(false);
+    }
+  }, [flavor, setBasemapStyleUrl, t]);
 
   const percent =
     progress && progress.dataBytesTotal > 0
@@ -606,10 +1070,13 @@ export function BasemapExtractPanel({
         ref={panelRef}
         className={
           pos
-            ? "pointer-events-auto absolute z-20 flex w-80 flex-col overflow-hidden rounded-lg border bg-background shadow-xl"
-            : "pointer-events-auto absolute start-3 top-16 z-20 flex max-h-[calc(100%-6rem)] w-[min(20rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-lg border bg-background shadow-xl"
+            ? "pointer-events-auto absolute z-20 flex w-[26rem] max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-lg border bg-background shadow-xl"
+            : "pointer-events-auto absolute start-3 top-3 z-20 flex max-h-[calc(100%-1.5rem)] w-[min(26rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-lg border bg-background shadow-xl"
         }
-        style={pos ? { left: pos.x, top: pos.y } : undefined}
+        style={{
+          ...(pos ? { left: pos.x, top: pos.y } : {}),
+          ...(size ? { width: size.w, height: size.h } : {}),
+        }}
         role="region"
         aria-label={t("basemapExtract.title")}
         data-testid="basemap-extract-panel"
@@ -636,7 +1103,7 @@ export function BasemapExtractPanel({
           </button>
         </div>
 
-        <div className="flex flex-col gap-3 overflow-auto p-3 text-sm">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 text-sm">
           <div className="space-y-1">
             <Label htmlFor="basemap-extract-url" className="text-xs">
               {t("basemapExtract.url")}
@@ -652,9 +1119,6 @@ export function BasemapExtractPanel({
                 clearStatus();
               }}
             />
-            <p className="text-xs text-muted-foreground">
-              {t("basemapExtract.urlHint")}
-            </p>
           </div>
 
           <div className="flex gap-2">
@@ -674,12 +1138,30 @@ export function BasemapExtractPanel({
               type="button"
               size="sm"
               variant="outline"
+              className="flex-1"
               disabled={running}
               onClick={handleUseView}
             >
               <MapIcon className="h-3.5 w-3.5" aria-hidden="true" />
               {t("basemapExtract.useView")}
             </Button>
+            {bbox || bboxInvalid ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={running}
+                onClick={() => {
+                  setDrawing(false);
+                  setCoords(EMPTY_COORDS);
+                  clearStatus();
+                }}
+                title={t("basemapExtract.clearBbox")}
+                aria-label={t("basemapExtract.clearBbox")}
+              >
+                <Eraser className="h-3.5 w-3.5" aria-hidden="true" />
+              </Button>
+            ) : null}
           </div>
           {drawing ? (
             <p className="text-xs text-muted-foreground">
@@ -762,6 +1244,33 @@ export function BasemapExtractPanel({
             </p>
           ) : null}
 
+          <div className="space-y-1">
+            <Label htmlFor="basemap-extract-style" className="text-xs">
+              {t("basemapExtract.style")}
+            </Label>
+            <Select
+              id="basemap-extract-style"
+              value={flavor}
+              disabled={running}
+              onChange={(e) => {
+                setFlavor(e.target.value as ProtomapsFlavor | "");
+                clearStatus();
+              }}
+            >
+              {PROTOMAPS_FLAVORS.map((f) => (
+                <option key={f} value={f}>
+                  {t(`basemapExtract.flavor.${f}`)}
+                </option>
+              ))}
+              <option value="">{t("basemapExtract.flavorOverlay")}</option>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {flavor === ""
+                ? t("basemapExtract.styleHintOverlay")
+                : t("basemapExtract.styleHintBasemap")}
+            </p>
+          </div>
+
           {pendingPlan ? (
             <div className="space-y-2 rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
               <p className="text-xs">
@@ -813,6 +1322,25 @@ export function BasemapExtractPanel({
                   style={{ width: `${percent}%` }}
                 />
               </div>
+              {progress && progress.estimatedOutputBytes > 0 ? (
+                <p
+                  className={
+                    progress.estimatedOutputBytes >= CONFIRM_BYTES
+                      ? "text-xs font-medium text-amber-600 dark:text-amber-400"
+                      : "text-xs text-muted-foreground"
+                  }
+                >
+                  {progress.estimatedOutputBytes >= CONFIRM_BYTES
+                    ? t("basemapExtract.estimatedSizeLarge", {
+                        size: formatBytes(progress.estimatedOutputBytes),
+                        tiles: progress.tilesSelected.toLocaleString(),
+                      })
+                    : t("basemapExtract.estimatedSize", {
+                        size: formatBytes(progress.estimatedOutputBytes),
+                        tiles: progress.tilesSelected.toLocaleString(),
+                      })}
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -848,7 +1376,217 @@ export function BasemapExtractPanel({
               {running ? t("basemapExtract.extracting") : t("basemapExtract.extract")}
             </Button>
           </div>
+
+          <div className="space-y-1.5 border-t pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <Label className="text-xs">
+                {t("basemapExtract.savedTitle")}
+              </Label>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                disabled={opening}
+                onClick={() => void openPmtilesAsBasemap()}
+              >
+                {opening ? (
+                  <Loader2
+                    className="me-1 h-3.5 w-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <FolderOpen
+                    className="me-1 h-3.5 w-3.5"
+                    aria-hidden="true"
+                  />
+                )}
+                {t("basemapExtract.openFile")}
+              </Button>
+            </div>
+            {savedBasemaps.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                {t("basemapExtract.savedEmpty")}
+              </p>
+            ) : (
+              <div className="max-h-48 space-y-1 overflow-auto">
+                {savedBasemaps.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="flex items-center gap-1 rounded-md border px-2 py-1.5"
+                  >
+                    {renamingId === entry.id ? (
+                      <>
+                        <Input
+                          autoFocus
+                          className="h-7 flex-1 text-xs"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") commitRename();
+                            if (e.key === "Escape") setRenamingId(null);
+                          }}
+                          onBlur={commitRename}
+                        />
+                        <button
+                          type="button"
+                          className="rounded p-1 text-muted-foreground hover:text-foreground"
+                          onClick={commitRename}
+                          aria-label={t("common.save")}
+                        >
+                          <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <p
+                            className="truncate text-xs font-medium"
+                            title={entry.name}
+                          >
+                            {entry.name}
+                          </p>
+                          <div className="flex items-center gap-1.5">
+                            {entry.tileType === "vector" &&
+                            entry.flavor != null ? (
+                              <select
+                                className="h-6 rounded border border-input bg-background px-1 text-[11px] text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                value={(entry.flavor as ProtomapsFlavor) || "light"}
+                                onChange={(e) =>
+                                  handleSavedFlavorChange(
+                                    entry,
+                                    e.target.value as ProtomapsFlavor,
+                                  )
+                                }
+                                aria-label={t("basemapExtract.style")}
+                              >
+                                {PROTOMAPS_FLAVORS.map((f) => (
+                                  <option key={f} value={f}>
+                                    {t(`basemapExtract.flavor.${f}`)}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : null}
+                            <span className="truncate text-[11px] text-muted-foreground">
+                              {formatBytes(entry.bytes)} · z{entry.minZoom}–
+                              {entry.maxZoom}
+                            </span>
+                          </div>
+                        </div>
+                        {confirmDeleteId === entry.id ? (
+                          <>
+                            <span className="text-[11px] text-muted-foreground">
+                              {t("basemapExtract.confirmDelete")}
+                            </span>
+                            <button
+                              type="button"
+                              className="rounded p-1 text-destructive hover:bg-destructive/10"
+                              onClick={() => {
+                                deleteOfflineBasemap(entry.id);
+                                // If this entry is the live basemap, switch back
+                                // to the default first — otherwise the applied
+                                // MapLibre style is left pointing at a pmtiles://
+                                // source whose archive we're about to free, and
+                                // pans into unfetched tiles would silently 404.
+                                // Check the store (not the panel-local tracker,
+                                // which can be stale) so we never clobber a
+                                // basemap the user switched to elsewhere.
+                                if (isLiveOfflineBasemap(entry.id)) {
+                                  setBasemapStyleUrl(DEFAULT_BASEMAP);
+                                }
+                                // Free its in-memory archive/style if it's the
+                                // one currently applied, so nothing lingers.
+                                forgetStyledBasemap(entry.id);
+                                setConfirmDeleteId(null);
+                              }}
+                              title={t("basemapExtract.delete")}
+                              aria-label={t("basemapExtract.delete")}
+                            >
+                              <Trash2
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded p-1 text-muted-foreground hover:text-foreground"
+                              onClick={() => setConfirmDeleteId(null)}
+                              title={t("common.cancel")}
+                              aria-label={t("common.cancel")}
+                            >
+                              <X className="h-3.5 w-3.5" aria-hidden="true" />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="rounded p-1 text-muted-foreground hover:text-foreground disabled:opacity-40"
+                              disabled={
+                                entry.tileType !== "vector" ||
+                                entry.flavor == null ||
+                                applyingId === entry.id
+                              }
+                              onClick={() => void applySaved(entry)}
+                              title={t("basemapExtract.apply")}
+                              aria-label={t("basemapExtract.apply")}
+                            >
+                              {applyingId === entry.id ? (
+                                <Loader2
+                                  className="h-3.5 w-3.5 animate-spin"
+                                  aria-hidden="true"
+                                />
+                              ) : (
+                                <Layers
+                                  className="h-3.5 w-3.5"
+                                  aria-hidden="true"
+                                />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded p-1 text-muted-foreground hover:text-foreground"
+                              onClick={() => startRename(entry)}
+                              title={t("basemapExtract.rename")}
+                              aria-label={t("basemapExtract.rename")}
+                            >
+                              <Pencil
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded p-1 text-muted-foreground hover:text-destructive"
+                              onClick={() => setConfirmDeleteId(entry.id)}
+                              title={t("basemapExtract.delete")}
+                              aria-label={t("basemapExtract.delete")}
+                            >
+                              <Trash2
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                              />
+                            </button>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
+
+        <div
+          className="absolute bottom-0 end-0 h-4 w-4 cursor-se-resize touch-none rtl:cursor-sw-resize"
+          onPointerDown={handleResizeStart}
+          onPointerMove={handleResizeMove}
+          onPointerUp={handleResizeEnd}
+          onPointerCancel={handleResizeEnd}
+          role="separator"
+          aria-label={t("basemapExtract.resize")}
+        />
       </div>
     </>
   );

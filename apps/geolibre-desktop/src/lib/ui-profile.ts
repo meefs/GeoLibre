@@ -106,7 +106,6 @@ export const DATA_SOURCE_CATALOG: readonly DataSourceCatalogEntry[] = [
   { id: "geoparquet", section: "cloud", labelKey: "toolbar.item.geoparquetLayer", tier: "basic" },
   { id: "flatgeobuf", section: "cloud", labelKey: "toolbar.item.flatgeobufLayer", tier: "intermediate" },
   { id: "pmtiles", section: "cloud", labelKey: "toolbar.item.pmtilesLayer", tier: "intermediate" },
-  { id: "basemap-extract", section: "cloud", labelKey: "toolbar.item.basemapExtract", tier: "intermediate" },
   { id: "zarr", section: "cloud", labelKey: "toolbar.item.zarrLayer", tier: "advanced" },
   { id: "netcdf", section: "cloud", labelKey: "toolbar.item.netcdfHdf", tier: "advanced" },
   // 3D layers
@@ -210,8 +209,7 @@ export const MENU_ITEM_CATALOG: readonly MenuItemCatalogEntry[] = [
   // Print Layout is the primary way any user turns a map into a shareable PDF/PNG
   // deliverable, so it stays visible for every profile (GH #529).
   { id: "project.printLayout", menuId: "project", labelKey: "toolbar.item.printLayoutEllipsis", tier: "basic" },
-  { id: "project.offlineRegion", menuId: "project", labelKey: "toolbar.item.offlineRegionEllipsis", tier: "advanced" },
-  { id: "project.offlineManager", menuId: "project", labelKey: "toolbar.item.offlineManagerEllipsis", tier: "advanced" },
+  { id: "project.offlineRegion", menuId: "project", labelKey: "toolbar.item.offlineBasemapEllipsis", tier: "advanced" },
   { id: "project.storymap", menuId: "project", labelKey: "toolbar.item.storymapEllipsis", tier: "advanced" },
   // Edit
   { id: "edit.undo", menuId: "edit", labelKey: "toolbar.item.undo", tier: "basic" },
