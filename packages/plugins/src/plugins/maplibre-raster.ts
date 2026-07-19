@@ -71,10 +71,19 @@ const SAMPLE_RASTER_DATASETS: RasterSampleDataset[] = [
     url: "https://data.source.coop/giswqs/opengeos/naip_water_train.vrt",
     attribution: "USDA Farm Service Agency (FSA)",
   },
+  {
+    // A STAC FeatureCollection of 2023 North Dakota NAIP scenes, whose assets
+    // resolve to COGs on Azure blob storage: exercises maplibre-gl-raster's
+    // STAC mosaic support (v0.12.0+), which stitches the scenes at read time
+    // rather than requiring a prebuilt VRT or MosaicJSON.
+    label: "NAIP STAC mosaic (North Dakota)",
+    url: "https://data.source.coop/giswqs/opengeos/naip_nd_2023_stac.json",
+    attribution: "USDA Farm Service Agency (FSA)",
+  },
 ];
 
 // This type mirrors undocumented private members of RasterControl from
-// maplibre-gl-raster (re-verified against v0.11.1). All access is optional (?.)
+// maplibre-gl-raster (re-verified against v0.12.0). All access is optional (?.)
 // so a rename in a future release degrades to a no-op rather than a crash --
 // re-verify these names AND the .mlr-control-close selector in
 // wireRasterCloseButton when bumping the dependency.
@@ -188,7 +197,7 @@ export function setNonTiledRasterHandler(handler: NonTiledRasterHandler | null):
 }
 
 /** Whether a raster load error is the upstream "striped, not tiled" failure.
- * maplibre-gl-raster (re-verified against v0.11.1) rejects non-tiled GeoTIFFs with a message
+ * maplibre-gl-raster (re-verified against v0.12.0) rejects non-tiled GeoTIFFs with a message
  * containing "not tiled"; this is the only signal it exposes, so the match is
  * coupled to that wording. Re-verify it (and broaden if needed) when bumping the
  * dependency -- a reworded message degrades to the plain error, not a crash. */
@@ -593,7 +602,7 @@ function createRasterControl(RasterControlClass: RasterControlConstructor): Rast
   });
   // syncRasterLayersToStore re-reads getState().collapsed when these fire.
   // Safe: expand()/collapse() delegate to toggle(), which flips
-  // _state.collapsed BEFORE emitting the event (re-verified against v0.11.1) --
+  // _state.collapsed BEFORE emitting the event (re-verified against v0.12.0) --
   // re-verify that ordering when bumping the dependency.
   const panelStateSyncHandler: RasterControlEventHandler = () =>
     syncRasterLayersToStoreForRuntime(control);
@@ -689,7 +698,7 @@ function patchWebRasterOverlayFactory(app: GeoLibreAppAPI, control: RasterContro
     };
   };
 
-  // maplibre-gl-raster (re-verified against v0.11.1) calls `_deps.removeOverlay(this._map, this._overlay)`
+  // maplibre-gl-raster (re-verified against v0.12.0) calls `_deps.removeOverlay(this._map, this._overlay)`
   // from its LayerManager teardown (after the last raster is removed / the
   // control is destroyed); re-verify this hook exists when bumping the
   // dependency. Even if a future version stopped calling it, the control still
