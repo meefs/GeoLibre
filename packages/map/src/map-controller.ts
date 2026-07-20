@@ -356,6 +356,11 @@ export class MapController {
   // Undefined until the React layer supplies a translated label; the control
   // falls back to its own default in the meantime (single source for the string).
   private terrainLabel: string | undefined;
+  // Set when the Terrain control is switched on before the basemap style is
+  // ready (no DEM source yet, so setEnabled would have nothing to point at).
+  // handleStyleReady reconciles it once the source lands so the toggle isn't
+  // silently dropped; cleared whenever terrain is turned off.
+  private terrainEnablePending = false;
   private scaleControl: PlanetaryScaleControl | null = null;
   private attributionControl: maplibregl.AttributionControl | null = null;
   private logoControl: maplibregl.LogoControl | null = null;
@@ -442,6 +447,10 @@ export class MapController {
       this.styleReady = true;
       this.enforceProjection();
       this.addTerrainSource();
+      // If the Terrain control was switched on before the style finished
+      // loading, the DEM source didn't exist yet and auto-enable was deferred;
+      // now that the source is in, turn terrain on so the toggle isn't dropped.
+      if (this.terrainEnablePending) this.autoEnableTerrain();
       this.applyBasemapVisibility();
       this.applyBasemapOpacity();
       this.addLayerControl();
@@ -784,7 +793,13 @@ export class MapController {
       if (control === "compass") return this.addCompassControl();
       if (control === "geolocate") return this.addGeolocateControl();
       if (control === "globe") return this.addGlobeControl();
-      if (control === "terrain") return this.addTerrainControl();
+      if (control === "terrain") {
+        const added = this.addTerrainControl();
+        // Turning the Terrain control on should show 3D relief immediately, so
+        // users don't have to click the control button as a second step.
+        this.autoEnableTerrain();
+        return added;
+      }
       if (control === "scale") return this.addScaleControl();
       if (control === "attribution") return this.addAttributionControl();
       if (control === "logo") return this.addLogoControl();
@@ -2254,7 +2269,26 @@ export class MapController {
     return true;
   }
 
+  /**
+   * Turn 3D terrain on for the current control, deferring until the DEM source
+   * exists when the style is still loading. Called when the Terrain control is
+   * switched on so relief appears without a second click; the pending flag is
+   * reconciled by handleStyleReady once the source lands.
+   */
+  private autoEnableTerrain(): void {
+    if (!this.terrainControl) return;
+    if (this.map?.getSource(TERRAIN_SOURCE_ID)) {
+      this.terrainControl.setEnabled(true);
+      this.terrainEnablePending = false;
+    } else {
+      this.terrainEnablePending = true;
+    }
+  }
+
   private removeTerrainControl(): void {
+    // Any deferred auto-enable is void once terrain is being turned off, so a
+    // late style load can't re-enable a control the user just hid.
+    this.terrainEnablePending = false;
     if (this.map?.getTerrain()?.source === TERRAIN_SOURCE_ID) {
       this.map.setTerrain(null);
       // Mirror TerrainControl.setEnabled(false): restore MapLibre's default
