@@ -6,14 +6,17 @@ import {
   diagramsSuppressedByPointRenderer,
   effectiveVectorRules,
   isHexColor,
+  normalizeHexColor,
   styleValue,
   type GeoLibreLayer,
+  type LayerStyle,
   type LayerType,
   type LegendConfig,
   type LegendItemOverride,
+  type MarkerShape,
   type VectorStyleStop,
 } from "@geolibre/core";
-import type { LegendEntry, LegendSwatch } from "./print-layout";
+import type { LegendEntry, LegendMarker, LegendSwatch } from "./print-layout";
 
 /** Layer types styled as vectors (colored fills the legend can represent). */
 const VECTOR_TYPES: ReadonlySet<LayerType> = new Set<LayerType>([
@@ -91,10 +94,13 @@ export function buildLegend(layers: GeoLibreLayer[]): LegendEntry[] {
           continue;
         }
       }
+      const primary = pointMarkerSwatch(layer.style) ?? {
+        color: styleValue(layer.style, "fillColor"),
+      };
       entries.push({
         id: layer.id,
         name: layer.name,
-        swatches: [{ color: styleValue(layer.style, "fillColor") }, ...diagrams],
+        swatches: [primary, ...diagrams],
       });
       continue;
     }
@@ -107,6 +113,33 @@ export function buildLegend(layers: GeoLibreLayer[]): LegendEntry[] {
     });
   }
   return entries;
+}
+
+/**
+ * The primary legend swatch for a single-symbol point layer that renders a
+ * marker icon, carrying the marker so the legend draws the actual shape / SVG
+ * instead of a plain fill square. Mirrors `prepareMarker` (`@geolibre/map`):
+ * enabled only when `markerEnabled` is on, and a `"custom"` marker with no SVG
+ * markup falls through (returns null) to the plain fill swatch. Returns null
+ * for layers with no marker, so the caller keeps the existing fill swatch.
+ */
+function pointMarkerSwatch(style: LayerStyle): LegendSwatch | null {
+  if (styleValue(style, "markerEnabled") !== true) return null;
+  // Mirror the map (layer-sync gates the marker overlay on the "single" point
+  // renderer): cluster/heatmap draw clustered circles or a density surface with
+  // no individual markers, so the legend must not advertise a marker the map
+  // isn't drawing. Sibling guard to diagramsSuppressedByPointRenderer.
+  if (styleValue(style, "pointRenderer") !== "single") return null;
+  const shape = styleValue(style, "markerShape") as MarkerShape;
+  const color = normalizeHexColor(styleValue(style, "markerColor")) ?? "#3b82f6";
+  if (shape === "custom") {
+    const svg = styleValue(style, "markerSvg").trim();
+    if (!svg) return null;
+    const marker: LegendMarker = { shape, color, svg };
+    return { color, marker };
+  }
+  const marker: LegendMarker = { shape, color };
+  return { color, marker };
 }
 
 /** Stable key for an individual class swatch within an entry. */
@@ -187,6 +220,10 @@ export function applyLegendConfig(base: LegendEntry[], config: LegendConfig): Le
         label: hasLabelOverride(override?.label)
           ? renderedLabel(override?.label, swatch.label ?? "")
           : swatch.label,
+        // Preserve the marker so a point layer with both a marker icon and
+        // diagram symbology (a multi-swatch entry: [marker primary, ...diagrams])
+        // still draws its marker rather than regressing to a color square.
+        marker: swatch.marker,
       });
     });
     // Every class hidden: drop the whole entry rather than render an empty box.
@@ -268,6 +305,8 @@ export interface LegendEditorRow {
   kind: "entry" | "class";
   /** Swatch color, when the row has one (entries always do; class rows do too). */
   color?: string;
+  /** Point marker for a single-symbol entry row, so the editor previews it. */
+  marker?: LegendMarker;
   /** The auto-generated label. */
   defaultLabel: string;
   /** Effective label after applying any override. */
@@ -298,6 +337,7 @@ export function legendEditorRows(base: LegendEntry[], config: LegendConfig): Leg
       layerId: entry.id,
       kind: "entry",
       color: single ? entry.swatches[0]?.color : undefined,
+      marker: single ? entry.swatches[0]?.marker : undefined,
       defaultLabel: entry.name,
       // Show the raw override (so the input can hold spaces mid-edit) but fall
       // back to the default when it is blank, matching what applyLegendConfig
@@ -316,6 +356,7 @@ export function legendEditorRows(base: LegendEntry[], config: LegendConfig): Leg
         layerId: entry.id,
         kind: "class",
         color: swatch.color,
+        marker: swatch.marker,
         defaultLabel,
         label: hasLabelOverride(override?.label) ? (override?.label as string) : defaultLabel,
         hidden: Boolean(override?.hidden),
