@@ -22,6 +22,7 @@ import {
   maplibreOpenAerialMapPlugin,
   maplibreSourceCoopPlugin,
   maplibreNaturalEarthPlugin,
+  maplibreGeoLensPlugin,
   maplibreOvertureMapsPlugin,
   maplibreGraticulePlugin,
   maplibreCloudsPlugin,
@@ -82,6 +83,7 @@ import {
   type InstalledWebPlugin,
 } from "../lib/external-plugins";
 import { appendDiagnostic } from "../lib/diagnostics";
+import { openExternalLink } from "../lib/open-external";
 import { fetchUrlBytes } from "../lib/native-http";
 import { partitionProjectPluginManifestUrls } from "../lib/plugin-trust";
 import { createWmsTileUrl, normalizeWmsVersion } from "../components/layout/add-data/helpers";
@@ -145,6 +147,7 @@ manager.registerAll([
   maplibreOpenAerialMapPlugin,
   maplibreSourceCoopPlugin,
   maplibreNaturalEarthPlugin,
+  maplibreGeoLensPlugin,
   maplibreEsriWaybackPlugin,
   maplibreTimeSliderPlugin,
   maplibreTimelapsePlugin,
@@ -736,6 +739,7 @@ export function createAppAPI(mapControllerRef?: RefObject<MapController | null>)
     fitBounds: (bounds: [number, number, number, number]) =>
       mapControllerRef?.current?.fitBounds(bounds),
     getMap: () => mapControllerRef?.current?.getMap() ?? null,
+    openExternalUrl: (url: string) => void openExternalLink(url),
     pickLocalDirectoryFiles,
     // Present only on desktop (filesystem access); the Vector panel keys off its
     // presence to auto-discover shapefile sidecars instead of forcing the user
