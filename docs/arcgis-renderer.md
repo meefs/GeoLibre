@@ -259,6 +259,44 @@ In a scene:
   the configured vertical scale and offset. Selection highlights use the same
   transformed coordinates. Source data stays unchanged.
 
+## Map projections
+
+MapLibre and Mapbox draw only Web Mercator and a globe, but the SDK can draw a
+flat `MapView` in any projected coordinate system it knows by well-known ID
+(issue #2708). **Settings → Map → ArcGIS map projection** offers Spilhaus
+(54099), Equal Earth (8857), Robinson (54030), Winkel Tripel (54042),
+Mollweide (54009), Plate Carrée (4326) and the Arctic (3995) and Antarctic
+(3031) polar stereographic projections, plus **Custom WKID…** for any other
+Esri or EPSG code. The choice is saved as `preferences.map.arcgisWkid`; absent
+means Web Mercator. Picking a projection turns the globe off, since only the
+flat map uses it, and the globe button still switches to the globe and back.
+
+In another projection:
+
+- Vector layers (GeoJSON, feature services, the symbology pack's companion
+  layers) are reprojected on the client by the SDK's `projectOperator`, which
+  loads with the projected map only.
+- **COGs are warped into the projection** (`arcgis-reprojected-tiles.ts`). The
+  SDK cannot reproject a tile layer, so the COG layer tiles the view's
+  projection instead and fills each tile from the same Web Mercator tiles
+  `cog-tiler-wasm` renders on a Web Mercator map, with the same bands,
+  stretch and colormap: a 33 × 33 grid of the tile's points is projected to
+  longitude/latitude and the pixels between them are interpolated. Cells that
+  straddle a seam of the projection (Spilhaus cuts the land) are projected
+  pixel by pixel, and each tile reads the source zoom that matches how far
+  the projection stretches it there. Web Mercator tiles stop at ±85.05°, so
+  the polar caps above that latitude stay empty.
+- **No basemap is drawn.** Esri basemap styles and XYZ tiles are not warped,
+  so the Blank background colour shows instead. Other tiled data layers (XYZ,
+  WMS tiles, PMTiles, Zarr) do not draw either.
+- The camera, pointer coordinates, identify, selection and extent drawing
+  convert between the projection and longitude/latitude, so the shared
+  camera, other split panes and saved views stay in degrees.
+- The flat map stays a `MapView` even with terrain on, since a local scene
+  cannot use the projection; terrain applies again on the globe or in Web
+  Mercator. An unknown WKID shows the SDK's error over the map.
+- MapLibre, Mapbox and Cesium panes ignore the setting.
+
 ## Adding data
 
 Files dropped onto the map, the host importers behind **Add Data → FlatGeobuf
