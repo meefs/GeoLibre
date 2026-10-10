@@ -58,6 +58,14 @@ const LAYER_POINTER = { click: true, mousemove: true, mousedown: true, mouseup: 
 const HIT_TOLERANCE_PX = 4;
 
 /**
+ * How far the pointer may move between press and release and still count as a
+ * click, as MapLibre's `clickTolerance` (3 px by default). The browser fires
+ * `click` after any press and release on the canvas, so without it every drag
+ * that pans the globe also reaches a control's click handler.
+ */
+const CLICK_TOLERANCE_PX = 3;
+
+/**
  * The MapLibre-shaped map a plugin control receives on the globe.
  *
  * Camera, DOM and pointer events act on the globe. The Style Spec half is
@@ -148,12 +156,41 @@ class CesiumMapFacade extends maplibregl.Evented {
     ] as const) {
       if (event) this.cleanups.push(event.addEventListener(() => this.fire(name)));
     }
+    // MapLibre fires `render` every frame; the camera's `changed` above only
+    // fires past a movement threshold, so an element pinned to the map (a
+    // popup) follows the frames instead. Only built when someone listens.
+    const postRender = viewer.scene?.postRender;
+    if (postRender)
+      this.cleanups.push(
+        postRender.addEventListener(() => {
+          if (this.listens("render")) this.fire("render");
+        }),
+      );
     if (typeof ResizeObserver !== "undefined") {
       const observer = new ResizeObserver(() => this.fire("resize"));
       observer.observe(viewer.canvas);
       this.cleanups.push(() => observer.disconnect());
     }
     this.cleanups.push(restoreCompatibilityMouseEvents(viewer.canvas));
+    // Where the current press started, to drop the `click` that ends a drag.
+    // Each click consumes it, so a later click with no press of its own (from
+    // the keyboard, or dispatched) is not measured against a stale one; the
+    // consumed press stays on hand for the `dblclick` that follows the click.
+    let pressedAt: { x: number; y: number } | null = null;
+    let clickPress: { x: number; y: number } | null = null;
+    const onPress = (event: PointerEvent) => {
+      pressedAt = { x: event.clientX, y: event.clientY };
+    };
+    const onCancel = () => {
+      pressedAt = null;
+      clickPress = null;
+    };
+    viewer.canvas.addEventListener("pointerdown", onPress, true);
+    viewer.canvas.addEventListener("pointercancel", onCancel, true);
+    this.cleanups.push(() => {
+      viewer.canvas.removeEventListener("pointerdown", onPress, true);
+      viewer.canvas.removeEventListener("pointercancel", onCancel, true);
+    });
     for (const name of [
       "click",
       "dblclick",
@@ -163,6 +200,14 @@ class CesiumMapFacade extends maplibregl.Evented {
       "contextmenu",
     ] as const) {
       const listener = (originalEvent: MouseEvent) => {
+        // Consume the press before any early return, so it never goes stale.
+        const press = name === "dblclick" ? clickPress : name === "click" ? pressedAt : null;
+        if (name === "click") {
+          clickPress = pressedAt;
+          pressedAt = null;
+        } else if (name === "dblclick") {
+          clickPress = null;
+        }
         const C = this.Cesium;
         const scene = this.scene();
         if (!C || !scene) return;
@@ -172,6 +217,12 @@ class CesiumMapFacade extends maplibregl.Evented {
         // on the map or on one of its style layers.
         const layered = name in LAYER_POINTER && this.layerEvents.listening(name as PointerSource);
         if (!this.listens(name) && !layered) return;
+        if (
+          press &&
+          Math.hypot(originalEvent.clientX - press.x, originalEvent.clientY - press.y) >
+            CLICK_TOLERANCE_PX
+        )
+          return;
         const rect = viewer.canvas.getBoundingClientRect();
         const point = new maplibregl.Point(
           originalEvent.clientX - rect.left,

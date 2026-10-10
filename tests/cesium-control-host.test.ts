@@ -435,6 +435,43 @@ describe("CesiumControlHost", () => {
     assert.equal(clicks.length, 1);
   });
 
+  it("drops the click that ends a drag, as MapLibre's click tolerance does", () => {
+    const sceneViewer = makeSceneViewer(doc);
+    parent.appendChild(sceneViewer.canvas);
+    sceneViewer.canvas.getBoundingClientRect = () => ({ left: 0, top: 0 }) as DOMRect;
+    const host = new CesiumControlHost(sceneViewer as never, parent, makeFakeCesium() as never);
+    const facade = facadeOf(host);
+    const clicks: unknown[] = [];
+    facade.on("click", (event: unknown) => clicks.push(event));
+    const fire = (type: string, x: number, y: number) => {
+      const event = new doc.defaultView!.Event(type);
+      Object.assign(event, { clientX: x, clientY: y });
+      sceneViewer.canvas.dispatchEvent(event);
+    };
+    // A pan: pressed at one point, released 40 px away.
+    fire("pointerdown", 100, 100);
+    fire("click", 140, 100);
+    assert.equal(clicks.length, 0);
+    // A click that wobbles within the tolerance still lands.
+    fire("pointerdown", 100, 100);
+    fire("click", 102, 101);
+    assert.equal(clicks.length, 1);
+    // A click with no press of its own after a drag is not measured against
+    // the drag's stale press.
+    fire("pointerdown", 100, 100);
+    fire("click", 160, 100);
+    fire("click", 300, 300);
+    assert.equal(clicks.length, 2);
+    // The dblclick that ends a drag is dropped with its click.
+    const dblclicks: unknown[] = [];
+    facade.on("dblclick", (event: unknown) => dblclicks.push(event));
+    fire("pointerdown", 100, 100);
+    fire("click", 150, 100);
+    fire("dblclick", 150, 100);
+    assert.equal(dblclicks.length, 0);
+    host.destroy();
+  });
+
   it("forwards a pointer event on a scene that has no globe", () => {
     // `pickGlobeHit` answers a globe-less scene with a WGS84 ellipsoid pick, so
     // the facade's cartographic conversion cannot assume `scene.globe` exists.
